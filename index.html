@@ -38,10 +38,10 @@
     const MAZE_PIXEL_W = WORLD_COLS * CELL_PIXEL_W;
     const MAZE_PIXEL_H = WORLD_ROWS * CELL_PIXEL_H;
 
-    // Two mazes sit side by side, each with its own guy, walls, dots and
-    // enemies. Every key press moves the guy in both. The level is cleared
-    // when both mazes are, and he dies if he is caught in either.
-    const MAZE_COUNT = 2;
+    // Mazes sit side by side, each with its own guy, walls, dots and
+    // enemies. Every key press moves the guy in all of them. The level is
+    // cleared when every maze is, and he dies if he is caught in any.
+    const MAZE_COUNT = 1;
     const MAZE_GAP_PX = 24;
 
     // On this row the left and right border walls have a gap. Walking off
@@ -57,10 +57,10 @@
 
     // On level 1 enemies step this often. Each later level they move this
     // many times faster than the level before.
-    const LEVEL_1_ENEMY_STEP_INTERVAL_MS = 750;
+    const LEVEL_1_ENEMY_STEP_INTERVAL_MS = 1000;
     const ENEMY_SPEEDUP_PER_LEVEL = 1.05;
 
-    const ENEMIES_PER_MAZE = 2;
+    const ENEMIES_PER_MAZE = 3;
 
     // Enemies start at least this many squares from the guy, counted
     // straight across the grid ignoring walls
@@ -127,6 +127,18 @@
 
     const POINTS_PER_DOT = 10;
 
+    // The guy shoots with Space. A bullet flies in a straight line at the
+    // nearest enemy he has a clear line to, or at the nearest enemy if none
+    // is in sight, and stops at the first wall. An enemy it hits scores
+    // points and walks back to the far corner, the same as an eaten one.
+    const BULLET_SPEED_PX_PER_MS = 0.5;
+    const BULLET_RADIUS_PX = 4;
+    const BULLET_COLOR = "#ffffff";
+    const BULLET_STEP_PX = 4;
+    const BULLET_UPDATE_INTERVAL_MS = 16;
+    const SHOT_COOLDOWN_MS = 300;
+    const SHOT_ENEMY_POINTS = 200;
+
     // Wall look: a stone bar half a square thick with a bevelled edge
     const WALL_BEVEL_PX = 3;
     const WALL_FACE_COLOR = "#5a5a5a";
@@ -164,8 +176,12 @@
     //   enemySlides         per enemy: where its slide started, when, how long
     //   frightenedUntilMs   when this maze's power runs out
     //   frightenedEnemyIndexes  enemies still frightened and edible
-    //   returningEnemyCorners   eaten enemies walking back (index -> [x, y])
+    //   returningEnemyCorners   eaten or shot enemies walking back (index -> [x, y])
+    //   bullets             { x, y, vx, vy, lastMs } in pixels from the maze's
+    //                       top-left, velocity in pixels per ms
     let mazes = [];
+
+    let lastShotMs = -Infinity;
 
     // The enemy clock ticks RETURNING_ENEMY_SPEEDUP times per normal step;
     // returning enemies move every tick, the rest only on full steps
@@ -173,6 +189,7 @@
     let enemyTickCount = 0;
 
     startGame();
+    setInterval(stepBullets, BULLET_UPDATE_INTERVAL_MS);
 
     resizeCanvas();
     requestAnimationFrame(renderFrame);
@@ -190,6 +207,10 @@
         }
 
         switch (event.key) {
+
+            case " ":
+                shoot(performance.now());
+                break;
 
             case "ArrowUp":
                 takeTurn(0, -1);
@@ -254,6 +275,7 @@
             frightenedUntilMs: -Infinity,
             frightenedEnemyIndexes: new Set(),
             returningEnemyCorners: new Map(),
+            bullets: [],
         };
     }
 
@@ -309,6 +331,158 @@
         if (isCaught) {
             isDead = true;
         }
+    }
+
+    // Bullets fly smoothly, so they move on their own fast clock rather than
+    // the enemy one; they stop where they are once the guy is dead
+    function stepBullets() {
+        if (isDead) {
+            return;
+        }
+        const nowMs = performance.now();
+        let points = 0;
+        mazes = mazes.map((maze) => {
+            const flight = moveBullets(maze, nowMs);
+            points += flight.points;
+            return flight.maze;
+        });
+        score += points;
+    }
+
+    // Fires a bullet from the guy in every maze, unless he shot too recently
+    function shoot(nowMs) {
+        if (nowMs - lastShotMs < SHOT_COOLDOWN_MS) {
+            return;
+        }
+        lastShotMs = nowMs;
+        mazes = mazes.map((maze) => fireBullet(maze, nowMs));
+    }
+
+    // The maze with a new bullet leaving the middle of the guy, aimed at
+    // the middle of the nearest enemy he can see, or the nearest enemy at
+    // all if none is in sight. Enemies walking back can't be targeted.
+    function fireBullet(maze, nowMs) {
+        const [guyDrawX, guyDrawY] = getGuyDrawPosition(maze, nowMs);
+        const fromX = guyDrawX * PIXEL_RES + CELL_PIXEL_W / 2;
+        const fromY = guyDrawY * PIXEL_RES + CELL_PIXEL_H / 2;
+
+        const targets = getEnemyDrawSquares(maze, nowMs)
+            .map(([enemyDrawSqX, enemyDrawSqY], i) => ({
+                index: i,
+                x: (enemyDrawSqX + 0.5) * CELL_PIXEL_W,
+                y: (enemyDrawSqY + 0.5) * CELL_PIXEL_H,
+            }))
+            .filter(({ index }) => !maze.returningEnemyCorners.has(index))
+            .sort((a, b) => Math.hypot(a.x - fromX, a.y - fromY) - Math.hypot(b.x - fromX, b.y - fromY));
+        if (targets.length === 0) {
+            return maze;
+        }
+
+        let target = targets.find(({ x, y }) => hasLineOfSight(maze.walls, fromX, fromY, x, y));
+        if (target === undefined) {
+            target = targets[0];
+        }
+
+        const distance = Math.hypot(target.x - fromX, target.y - fromY);
+        if (distance === 0) {
+            return maze;
+        }
+        const bullet = {
+            x: fromX,
+            y: fromY,
+            vx: ((target.x - fromX) / distance) * BULLET_SPEED_PX_PER_MS,
+            vy: ((target.y - fromY) / distance) * BULLET_SPEED_PX_PER_MS,
+            lastMs: nowMs,
+        };
+        return { ...maze, bullets: [...maze.bullets, bullet] };
+    }
+
+    // Moves every bullet to where it is now, in small steps so it can't
+    // skip past a wall or an enemy. A bullet is gone once it hits a wall,
+    // leaves the maze or hits an enemy; a hit enemy scores and starts
+    // walking back to the corner farthest from the guy.
+    function moveBullets(maze, nowMs) {
+        let updated = maze;
+        let points = 0;
+        const remainingBullets = [];
+
+        for (const bullet of maze.bullets) {
+            const travelPx = (nowMs - bullet.lastMs) * BULLET_SPEED_PX_PER_MS;
+            const stepCount = Math.max(1, Math.ceil(travelPx / BULLET_STEP_PX));
+            const stepMs = (nowMs - bullet.lastMs) / stepCount;
+            let x = bullet.x;
+            let y = bullet.y;
+            let isGone = false;
+
+            for (let step = 0; step < stepCount && !isGone; step++) {
+                x += bullet.vx * stepMs;
+                y += bullet.vy * stepMs;
+
+                const isOutside = x < 0 || y < 0 || x >= MAZE_PIXEL_W || y >= MAZE_PIXEL_H;
+                if (isOutside || isPointInWall(updated.walls, x, y)) {
+                    isGone = true;
+                    continue;
+                }
+
+                const hitIndex = findEnemyHitByBullet(updated, x, y, nowMs);
+                if (hitIndex !== -1) {
+                    points += SHOT_ENEMY_POINTS;
+                    updated = {
+                        ...updated,
+                        frightenedEnemyIndexes: new Set([...updated.frightenedEnemyIndexes].filter((index) => index !== hitIndex)),
+                        returningEnemyCorners: new Map([
+                            ...updated.returningEnemyCorners,
+                            [hitIndex, getFarthestFreeCorner(updated, hitIndex)],
+                        ]),
+                    };
+                    isGone = true;
+                }
+            }
+
+            if (!isGone) {
+                remainingBullets.push({ ...bullet, x, y, lastMs: nowMs });
+            }
+        }
+
+        return { maze: { ...updated, bullets: remainingBullets }, points };
+    }
+
+    // Index of the enemy whose drawn box the point is inside, ignoring
+    // enemies already walking back, or -1 if none
+    function findEnemyHitByBullet(maze, x, y, nowMs) {
+        return getEnemyDrawSquares(maze, nowMs).findIndex(([enemyDrawSqX, enemyDrawSqY], i) => {
+            const left = enemyDrawSqX * CELL_PIXEL_W - BULLET_RADIUS_PX;
+            const top = enemyDrawSqY * CELL_PIXEL_H - BULLET_RADIUS_PX;
+            const right = (enemyDrawSqX + 1) * CELL_PIXEL_W + BULLET_RADIUS_PX;
+            const bottom = (enemyDrawSqY + 1) * CELL_PIXEL_H + BULLET_RADIUS_PX;
+            const isInside = x >= left && x <= right && y >= top && y <= bottom;
+            return isInside && !maze.returningEnemyCorners.has(i);
+        });
+    }
+
+    // True if the pixel point is on a wall as drawn: inside one of the bars
+    // of the wall square it falls in
+    function isPointInWall(walls, x, y) {
+        const sqX = Math.floor(x / CELL_PIXEL_W);
+        const sqY = Math.floor(y / CELL_PIXEL_H);
+        if (!walls.has(wallKey(sqX, sqY))) {
+            return false;
+        }
+        return getWallRects(walls, sqX, sqY).some(([left, top, w, h]) => (
+            x >= left && x <= left + w && y >= top && y <= top + h
+        ));
+    }
+
+    // True if a straight line between the two pixel points crosses no wall
+    function hasLineOfSight(walls, fromX, fromY, toX, toY) {
+        const stepCount = Math.ceil(Math.hypot(toX - fromX, toY - fromY) / BULLET_STEP_PX);
+        for (let step = 1; step < stepCount; step++) {
+            const t = step / stepCount;
+            if (isPointInWall(walls, fromX + (toX - fromX) * t, fromY + (toY - fromY) * t)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     function getEnemyStepIntervalMs() {
@@ -960,6 +1134,13 @@
         const [guyDrawX, guyDrawY] = getGuyDrawPosition(maze, nowMs);
         drawGuy(guyDrawX, guyDrawY, GUY_COLORS);
 
+        ctx.fillStyle = BULLET_COLOR;
+        for (const { x, y } of maze.bullets) {
+            ctx.beginPath();
+            ctx.arc(x, y, BULLET_RADIUS_PX, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
         ctx.restore();
     }
 
@@ -1161,17 +1342,23 @@
 
     function drawLevelInfo(nowMs) {
         const dotsLeft = mazes.reduce((total, maze) => total + maze.dots.size + maze.powerPellets.size, 0);
-        const mazeNames = ["Left", "Right"];
+        // With several mazes each power countdown says which maze it is for
+        let mazeNames = ["Power"];
+        if (mazes.length > 1) {
+            mazeNames = ["Left power", "Right power"];
+        }
         const powerTexts = mazes
             .map((maze, i) => [maze, mazeNames[i]])
             .filter(([maze]) => nowMs < maze.frightenedUntilMs)
-            .map(([maze, name]) => `${name} power: ${Math.ceil((maze.frightenedUntilMs - nowMs) / 1000)}s`);
+            .map(([maze, name]) => `${name}: ${Math.ceil((maze.frightenedUntilMs - nowMs) / 1000)}s`);
 
         ctx.fillStyle = HUD_TEXT_COLOR;
         ctx.textAlign = "left";
         ctx.font = "18px sans-serif";
         const text = [`Score: ${score}`, `Level ${level}`, `Dots left: ${dotsLeft}`, ...powerTexts].join("    ");
         ctx.fillText(text, 4, MAZE_PIXEL_H + 24);
+        ctx.font = "14px sans-serif";
+        ctx.fillText("Arrows: move    Space: shoot", 4, MAZE_PIXEL_H + 46);
     }
 
     function drawDeathMessage() {
