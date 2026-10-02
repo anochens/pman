@@ -97,6 +97,31 @@
     // The guy slides between squares instead of jumping. Enemies glide at a
     // steady speed, each slide lasting their whole step interval.
     const GUY_SLIDE_MS = 120;
+
+    // The player's guy is drawn smoothly, at full screen resolution, as his
+    // coloured body bar with two human legs under it: thigh, knee, shin and
+    // foot, seen from the side. Sizes are in screen pixels within his box.
+    const GUY_BODY_HEIGHT_PX = 10;
+    const GUY_HIP_OFFSET_PX = 5;
+    const GUY_THIGH_PX = 10;
+    const GUY_SHIN_PX = 10;
+    const GUY_FOOT_PX = 6;
+    const GUY_LEG_WIDTH_PX = 4;
+
+    // Walking: each thigh swings forward and back from the hip, the legs
+    // half a cycle apart so they pass each other. The knee bends while a
+    // leg swings forward and stays almost straight while it carries his
+    // weight, and his body rises a little as the legs pass. One full cycle
+    // is two steps. He counts as walking until GUY_WALK_LINGER_MS after his
+    // last step, which covers the gap between held-key repeats; then he
+    // stands still with straight legs.
+    const GUY_WALK_CYCLE_MS = 520;
+    const GUY_HIP_SWING_DEG = 28;
+    const GUY_KNEE_BEND_DEG = 65;
+    const GUY_STANCE_KNEE_BEND_DEG = 6;
+    const GUY_BODY_BOB_PX = 2;
+    const GUY_WALK_LINGER_MS = 220;
+
     const DOT_COLOR = "#ffd700";
     const DOT_RADIUS_PX = 3;
 
@@ -127,10 +152,11 @@
 
     const POINTS_PER_DOT = 10;
 
-    // The guy shoots with Space. A bullet flies in a straight line at the
-    // nearest enemy he has a clear line to, or at the nearest enemy if none
-    // is in sight, and stops at the first wall. An enemy it hits scores
-    // points and walks back to the far corner, the same as an eaten one.
+    // The guy shoots with Space. A bullet flies straight up, down, left or
+    // right: at the nearest enemy lined up with him in clear sight, or
+    // otherwise in the direction that points most toward the nearest enemy.
+    // It stops at the first wall. An enemy it hits scores points and walks
+    // back to the far corner, the same as an eaten one.
     const BULLET_SPEED_PX_PER_MS = 0.5;
     const BULLET_RADIUS_PX = 4;
     const BULLET_COLOR = "#ffffff";
@@ -171,7 +197,9 @@
     //   walls, dots,
     //   powerPellets        Sets of "x,y" keys in guy-unit squares
     //   guyX, guyY          guy position in pixel-grid squares
-    //   guySlide            where his slide started and when
+    //   guySlide            where his slide started, when, and when his
+    //                       current run of steps began (for his walk cycle)
+    //   guyFacing           1 if he last moved right, -1 if left
     //   enemies             [x, y] in guy-unit squares
     //   enemySlides         per enemy: where its slide started, when, how long
     //   frightenedUntilMs   when this maze's power runs out
@@ -269,7 +297,8 @@
             powerPellets,
             guyX: GUY_START_X,
             guyY: GUY_START_Y,
-            guySlide: { fromX: GUY_START_X, fromY: GUY_START_Y, startMs: -Infinity },
+            guySlide: { fromX: GUY_START_X, fromY: GUY_START_Y, startMs: -Infinity, walkStartMs: -Infinity },
+            guyFacing: 1,
             enemies,
             enemySlides: enemies.map(([x, y]) => ({ fromX: x, fromY: y, startMs: -Infinity, durationMs: 1 })),
             frightenedUntilMs: -Infinity,
@@ -358,19 +387,23 @@
         mazes = mazes.map((maze) => fireBullet(maze, nowMs));
     }
 
-    // The maze with a new bullet leaving the middle of the guy, aimed at
-    // the middle of the nearest enemy he can see, or the nearest enemy at
-    // all if none is in sight. Enemies walking back can't be targeted.
+    // The maze with a new bullet leaving the middle of the guy's square and
+    // flying straight up, down, left or right along his row or column. It
+    // goes toward the nearest enemy lined up with him with no wall in
+    // between; if there is none, in whichever of the four directions points
+    // most toward the nearest enemy. Enemies walking back can't be targeted.
     function fireBullet(maze, nowMs) {
-        const [guyDrawX, guyDrawY] = getGuyDrawPosition(maze, nowMs);
-        const fromX = guyDrawX * PIXEL_RES + CELL_PIXEL_W / 2;
-        const fromY = guyDrawY * PIXEL_RES + CELL_PIXEL_H / 2;
+        const [guySqX, guySqY] = getGuySquare(maze);
+        const fromX = (guySqX + 0.5) * CELL_PIXEL_W;
+        const fromY = (guySqY + 0.5) * CELL_PIXEL_H;
 
-        const targets = getEnemyDrawSquares(maze, nowMs)
-            .map(([enemyDrawSqX, enemyDrawSqY], i) => ({
-                index: i,
-                x: (enemyDrawSqX + 0.5) * CELL_PIXEL_W,
-                y: (enemyDrawSqY + 0.5) * CELL_PIXEL_H,
+        const targets = maze.enemies
+            .map(([sqX, sqY], index) => ({
+                index,
+                sqX,
+                sqY,
+                x: (sqX + 0.5) * CELL_PIXEL_W,
+                y: (sqY + 0.5) * CELL_PIXEL_H,
             }))
             .filter(({ index }) => !maze.returningEnemyCorners.has(index))
             .sort((a, b) => Math.hypot(a.x - fromX, a.y - fromY) - Math.hypot(b.x - fromX, b.y - fromY));
@@ -378,20 +411,29 @@
             return maze;
         }
 
-        let target = targets.find(({ x, y }) => hasLineOfSight(maze.walls, fromX, fromY, x, y));
+        let target = targets.find(({ sqX, sqY, x, y }) => (
+            (sqX === guySqX || sqY === guySqY) && hasLineOfSight(maze.walls, fromX, fromY, x, y)
+        ));
         if (target === undefined) {
             target = targets[0];
         }
 
-        const distance = Math.hypot(target.x - fromX, target.y - fromY);
-        if (distance === 0) {
+        // Pick the axis the target is farther along, counted in squares
+        const squaresAcross = target.sqX - guySqX;
+        const squaresDown = target.sqY - guySqY;
+        if (squaresAcross === 0 && squaresDown === 0) {
             return maze;
         }
+        let [directionX, directionY] = [Math.sign(squaresAcross), 0];
+        if (Math.abs(squaresDown) > Math.abs(squaresAcross)) {
+            [directionX, directionY] = [0, Math.sign(squaresDown)];
+        }
+
         const bullet = {
             x: fromX,
             y: fromY,
-            vx: ((target.x - fromX) / distance) * BULLET_SPEED_PX_PER_MS,
-            vy: ((target.y - fromY) / distance) * BULLET_SPEED_PX_PER_MS,
+            vx: directionX * BULLET_SPEED_PX_PER_MS,
+            vy: directionY * BULLET_SPEED_PX_PER_MS,
             lastMs: nowMs,
         };
         return { ...maze, bullets: [...maze.bullets, bullet] };
@@ -525,7 +567,25 @@
             [fromX, fromY] = [newX, newY];
         }
 
-        return { ...maze, guyX: newX, guyY: newY, guySlide: { fromX, fromY, startMs: nowMs } };
+        // A step soon after the last one carries on the same walk cycle;
+        // otherwise he starts a new one. Moving up or down keeps the way he
+        // last faced.
+        let walkStartMs = nowMs;
+        if (nowMs - maze.guySlide.startMs < GUY_WALK_LINGER_MS) {
+            walkStartMs = maze.guySlide.walkStartMs;
+        }
+        let guyFacing = maze.guyFacing;
+        if (dxUnits !== 0) {
+            guyFacing = Math.sign(dxUnits);
+        }
+
+        return {
+            ...maze,
+            guyX: newX,
+            guyY: newY,
+            guyFacing,
+            guySlide: { fromX, fromY, startMs: nowMs, walkStartMs },
+        };
     }
 
     // The guy eats the dot or power pellet on his square. A power pellet
@@ -1132,7 +1192,7 @@
             drawGuy(x, y, getEnemyColors(maze, mazeIndex, i, nowMs));
         });
         const [guyDrawX, guyDrawY] = getGuyDrawPosition(maze, nowMs);
-        drawGuy(guyDrawX, guyDrawY, GUY_COLORS);
+        drawWalkingGuy(guyDrawX, guyDrawY, GUY_COLORS, getGuyWalkPhase(maze, nowMs), maze.guyFacing);
 
         ctx.fillStyle = BULLET_COLOR;
         for (const { x, y } of maze.bullets) {
@@ -1282,42 +1342,113 @@
         }
     }
 
-    // x and y may be fractional while a guy slides between squares; the
-    // pixel position is rounded so his edges stay crisp
-    function drawSq(x, y, color) {
-        ctx.fillStyle = color;
-
-        ctx.fillRect(
-            Math.round(x * PIXEL_RES),
-            Math.round(y * PIXEL_RES),
-            PIXEL_RES,
-            PIXEL_RES
-        );
-    }
-
+    // Draws an enemy-style guy whose top-left is at (x, y) in pixel-grid
+    // squares: a 4x3 block shape with a bar across the top and a leg down
+    // each side. x and y may be fractional while he slides; the pixel
+    // position is rounded so his edges stay crisp.
     function drawGuy(x, y, colors) {
+        const left = Math.round(x * PIXEL_RES);
+        const top = Math.round(y * PIXEL_RES);
+
         // Fill his whole box first so nothing behind him shows through
         if (colors.inside) {
             ctx.fillStyle = colors.inside;
-            ctx.fillRect(
-                Math.round(x * PIXEL_RES),
-                Math.round(y * PIXEL_RES),
-                CELL_PIXEL_W,
-                CELL_PIXEL_H
-            );
+            ctx.fillRect(left, top, CELL_PIXEL_W, CELL_PIXEL_H);
         }
 
-        // Guy's pixels are laid out relative to his position
-        drawSq(x,     y,     colors.left);
-        drawSq(x,     y + 1, colors.left);
-        drawSq(x,     y + 2, colors.left);
+        const blocks = [
+            [0, 0, colors.left], [0, 1, colors.left], [0, 2, colors.left],
+            [1, 0, colors.top[0]], [2, 0, colors.top[1]],
+            [3, 0, colors.right], [3, 1, colors.right], [3, 2, colors.right],
+        ];
+        for (const [col, row, color] of blocks) {
+            ctx.fillStyle = color;
+            ctx.fillRect(left + col * PIXEL_RES, top + row * PIXEL_RES, PIXEL_RES, PIXEL_RES);
+        }
+    }
 
-        drawSq(x + 1, y,     colors.top[0]);
-        drawSq(x + 2, y,     colors.top[1]);
+    // Draws the player's guy, top-left at (x, y) in pixel-grid squares,
+    // facing right (facing = 1) or left (-1). walkPhase is how far through
+    // his walk cycle he is, from 0 to 1, or null while he stands still.
+    function drawWalkingGuy(x, y, colors, walkPhase, facing) {
+        const left = x * PIXEL_RES;
+        const top = y * PIXEL_RES;
+        const middleX = left + CELL_PIXEL_W / 2;
 
-        drawSq(x + 3, y,     colors.right);
-        drawSq(x + 3, y + 1, colors.right);
-        drawSq(x + 3, y + 2, colors.right);
+        if (colors.inside) {
+            ctx.fillStyle = colors.inside;
+            ctx.fillRect(Math.round(left), Math.round(top), CELL_PIXEL_W, CELL_PIXEL_H);
+        }
+
+        // Each leg's thigh angle from straight down (positive is forward) and
+        // knee bend, in degrees. The two legs are half a cycle apart.
+        let legAngles = [{ hip: 0, knee: 0 }, { hip: 0, knee: 0 }];
+        let bodyRise = 0;
+        if (walkPhase !== null) {
+            legAngles = [walkPhase, walkPhase + 0.5].map((phase) => {
+                const turn = 2 * Math.PI * phase;
+                // A leg swings forward while its hip angle is rising, which is
+                // when sin(turn) is negative; that is when its knee bends
+                const swing = Math.max(0, -Math.sin(turn));
+                return {
+                    hip: GUY_HIP_SWING_DEG * Math.cos(turn),
+                    knee: GUY_STANCE_KNEE_BEND_DEG + (GUY_KNEE_BEND_DEG - GUY_STANCE_KNEE_BEND_DEG) * swing,
+                };
+            });
+            // Highest as the legs pass each other, lowest with feet apart
+            bodyRise = GUY_BODY_BOB_PX * Math.abs(Math.sin(2 * Math.PI * walkPhase));
+        }
+
+        const bodyTop = top - bodyRise;
+        const hipY = bodyTop + GUY_BODY_HEIGHT_PX;
+        const toRadians = (degrees) => (degrees * Math.PI) / 180;
+
+        // Far leg first so the near one is drawn over it
+        const legs = [
+            { angles: legAngles[1], hipX: middleX - GUY_HIP_OFFSET_PX * facing, color: colors.left },
+            { angles: legAngles[0], hipX: middleX + GUY_HIP_OFFSET_PX * facing, color: colors.right },
+        ];
+        ctx.lineWidth = GUY_LEG_WIDTH_PX;
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+        for (const { angles, hipX, color } of legs) {
+            const thighAngle = toRadians(angles.hip);
+            const shinAngle = thighAngle - toRadians(angles.knee);
+            const kneeX = hipX + Math.sin(thighAngle) * GUY_THIGH_PX * facing;
+            const kneeY = hipY + Math.cos(thighAngle) * GUY_THIGH_PX;
+            const ankleX = kneeX + Math.sin(shinAngle) * GUY_SHIN_PX * facing;
+            const ankleY = kneeY + Math.cos(shinAngle) * GUY_SHIN_PX;
+            const toeX = ankleX + GUY_FOOT_PX * facing;
+
+            ctx.strokeStyle = color;
+            ctx.beginPath();
+            ctx.moveTo(hipX, hipY);
+            ctx.lineTo(kneeX, kneeY);
+            ctx.lineTo(ankleX, ankleY);
+            ctx.lineTo(toeX, ankleY);
+            ctx.stroke();
+        }
+
+        // Body bar on top of the legs, in his four colours
+        const barColors = [colors.left, colors.top[0], colors.top[1], colors.right];
+        const segmentW = CELL_PIXEL_W / barColors.length;
+        barColors.forEach((color, i) => {
+            ctx.fillStyle = color;
+            ctx.fillRect(left + i * segmentW, bodyTop, segmentW, GUY_BODY_HEIGHT_PX);
+        });
+    }
+
+    // How far through his walk cycle the guy is, from 0 to 1, or null if
+    // he is standing still. A new walk starts a quarter of the way in, with
+    // his legs together and one about to lift, so he never snaps from
+    // standing straight to a wide stride.
+    function getGuyWalkPhase(maze, nowMs) {
+        const isWalking = nowMs - maze.guySlide.startMs < GUY_WALK_LINGER_MS;
+        if (!isWalking) {
+            return null;
+        }
+        const cycles = (nowMs - maze.guySlide.walkStartMs) / GUY_WALK_CYCLE_MS;
+        return (cycles + 0.25) % 1;
     }
 
     // Just the outline of a guy's shape, with nothing filled in, so
