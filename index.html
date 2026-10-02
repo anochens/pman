@@ -109,6 +109,10 @@
     const FRIGHTENED_FLASH_PERIOD_MS = 250;
     const EATEN_ENEMY_POINTS = 200;
     const RETURNING_ENEMY_SPEEDUP = 2;
+
+    // An enemy walking back is drawn as just a faint grey outline
+    const RETURNING_ENEMY_OUTLINE_COLOR = "rgba(160, 160, 160, 0.55)";
+    const RETURNING_ENEMY_OUTLINE_WIDTH_PX = 2;
     const HUD_TEXT_COLOR = "#000";
 
     const POINTS_PER_DOT = 10;
@@ -425,6 +429,26 @@
         drawSq(x + 3, y + 2, colors.right);
     }
 
+    // Just the outline of a guy's shape, with nothing filled in, so
+    // whatever is behind him shows through
+    function drawGuyOutline(x, y, color) {
+        const left = Math.round(x * PIXEL_RES);
+        const top = Math.round(y * PIXEL_RES);
+
+        // Corners of the guy's shape (left leg, top bar, right leg) in
+        // pixel-grid squares, traced clockwise from the top-left
+        const corners = [[0, 0], [4, 0], [4, 3], [3, 3], [3, 1], [1, 1], [1, 3], [0, 3]];
+
+        ctx.strokeStyle = color;
+        ctx.lineWidth = RETURNING_ENEMY_OUTLINE_WIDTH_PX;
+        ctx.beginPath();
+        for (const [cornerX, cornerY] of corners) {
+            ctx.lineTo(left + cornerX * PIXEL_RES, top + cornerY * PIXEL_RES);
+        }
+        ctx.closePath();
+        ctx.stroke();
+    }
+
     function drawDeathMessage() {
         const gridPixelW = WORLD_COLS * GUY_WIDTH_SQUARES * PIXEL_RES;
         const gridPixelH = WORLD_ROWS * GUY_HEIGHT_SQUARES * PIXEL_RES;
@@ -484,7 +508,13 @@
         drawWalls();
         drawDots();
         getEnemyDrawSquares(nowMs).forEach(([enemyDrawSqX, enemyDrawSqY], i) => {
-            drawGuy(enemyDrawSqX * GUY_WIDTH_SQUARES, enemyDrawSqY * GUY_HEIGHT_SQUARES, getEnemyColors(i, nowMs));
+            const x = enemyDrawSqX * GUY_WIDTH_SQUARES;
+            const y = enemyDrawSqY * GUY_HEIGHT_SQUARES;
+            if (returningEnemyCorners.has(i)) {
+                drawGuyOutline(x, y, RETURNING_ENEMY_OUTLINE_COLOR);
+                return;
+            }
+            drawGuy(x, y, getEnemyColors(i, nowMs));
         });
         const [guyDrawX, guyDrawY] = getGuyDrawPosition(nowMs);
         drawGuy(guyDrawX, guyDrawY, GUY_COLORS);
@@ -520,19 +550,19 @@
         });
     }
 
-    // Normal colour, grey while frightened or walking back after being
-    // eaten, and flashing white at an even pace as the power runs out
+    // Normal colour, or grey while frightened, flashing white at an even
+    // pace as the power runs out
     function getEnemyColors(index, nowMs) {
-        if (returningEnemyCorners.has(index)) {
-            return FRIGHTENED_ENEMY_COLORS;
-        }
         if (!isEnemyFrightened(index, nowMs)) {
             return ENEMY_COLORS[index % ENEMY_COLORS.length];
         }
 
+        // Counting 250 ms blocks back from the end, odd blocks are white, so
+        // the first flash starts exactly FRIGHTENED_FLASH_FINAL_MS out and
+        // every flash and gap is a full block
         const msLeft = frightenedUntilMs - nowMs;
-        const isFlashOn = Math.floor(msLeft / FRIGHTENED_FLASH_PERIOD_MS) % 2 === 0;
-        if (msLeft <= FRIGHTENED_FLASH_FINAL_MS && isFlashOn) {
+        const isFlashOn = Math.floor(msLeft / FRIGHTENED_FLASH_PERIOD_MS) % 2 === 1;
+        if (msLeft < FRIGHTENED_FLASH_FINAL_MS && isFlashOn) {
             return FRIGHTENED_FLASH_COLORS;
         }
         return FRIGHTENED_ENEMY_COLORS;
@@ -840,25 +870,42 @@
         return freeCorners[0];
     }
 
-    // Puts one power pellet in each quarter of the maze, on the empty square
-    // (no dot, not the guy's start) nearest that quarter's middle, so the
-    // pellets are evenly spread out
+    // Puts one power pellet in each quarter of the maze, on the square in
+    // that quarter nearest its middle, so the pellets are evenly spread
+    // out. Squares without a dot are preferred; if a quarter has none, the
+    // pellet replaces a dot and any dot group that leaves too small goes.
     function placePowerPellets() {
         const [guySqX, guySqY] = getGuySquare();
         const guyKey = wallKey(guySqX, guySqY);
-        const emptySquares = [...getPathDistances(guySqX, guySqY).keys()]
-            .filter((key) => key !== guyKey && !dots.has(key))
+        const openSquares = [...getPathDistances(guySqX, guySqY).keys()]
+            .filter((key) => key !== guyKey)
             .map((key) => key.split(",").map(Number));
-        const quarterMiddles = [
-            [WORLD_COLS / 4, WORLD_ROWS / 4],
-            [(WORLD_COLS * 3) / 4, WORLD_ROWS / 4],
-            [WORLD_COLS / 4, (WORLD_ROWS * 3) / 4],
-            [(WORLD_COLS * 3) / 4, (WORLD_ROWS * 3) / 4],
+        const halfCols = WORLD_COLS / 2;
+        const halfRows = WORLD_ROWS / 2;
+        const quarters = [
+            { isLeft: true, isTop: true },
+            { isLeft: false, isTop: true },
+            { isLeft: true, isTop: false },
+            { isLeft: false, isTop: false },
         ];
 
         powerPellets.clear();
-        for (const [middleX, middleY] of quarterMiddles) {
-            const [nearestX, nearestY] = emptySquares.reduce((best, square) => {
+        for (const { isLeft, isTop } of quarters) {
+            const inQuarter = openSquares.filter(([x, y]) => (x < halfCols) === isLeft && (y < halfRows) === isTop);
+            let candidates = inQuarter.filter(([x, y]) => !dots.has(wallKey(x, y)));
+            if (candidates.length === 0) {
+                candidates = inQuarter;
+            }
+
+            let middleX = halfCols / 2;
+            if (!isLeft) {
+                middleX = halfCols * 1.5;
+            }
+            let middleY = halfRows / 2;
+            if (!isTop) {
+                middleY = halfRows * 1.5;
+            }
+            const [nearestX, nearestY] = candidates.reduce((best, square) => {
                 const squareDistance = Math.hypot(square[0] - middleX, square[1] - middleY);
                 const bestDistance = Math.hypot(best[0] - middleX, best[1] - middleY);
                 if (squareDistance < bestDistance) {
@@ -866,8 +913,13 @@
                 }
                 return best;
             });
-            powerPellets.add(wallKey(nearestX, nearestY));
+
+            const key = wallKey(nearestX, nearestY);
+            dots.delete(key);
+            powerPellets.add(key);
         }
+
+        removeSmallDotGroups();
     }
 
     // Lays dots as runs along the corridors until they cover about
@@ -909,6 +961,10 @@
             }
         }
 
+        removeSmallDotGroups();
+    }
+
+    function removeSmallDotGroups() {
         for (const group of getDotGroups()) {
             if (group.length < DOT_RUN_MIN_LENGTH) {
                 for (const key of group) {
