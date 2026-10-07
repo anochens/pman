@@ -176,11 +176,9 @@
     // angled in toward the crosshair: see-through blue plastic, like a
     // dollar-store bubble gun. It is a small 3D model built from boxes,
     // tubes and balls, drawn in perspective with glossy lighting; its
-    // inside walls show through the outside ones. A bubble swells at the
-    // nozzle as it gets ready to fire again (full size means ready); firing
-    // kicks the blaster back and a pop ring spreads from the nozzle. Each
-    // shot is a floating bubble that starts BUBBLE_START_AHEAD_SQUARES in
-    // front of the guy.
+    // inside walls show through the outside ones. Firing kicks the blaster
+    // back and a pop ring spreads from the nozzle. Each shot is a floating
+    // bubble that starts BUBBLE_START_AHEAD_SQUARES in front of the guy.
     //
     // Model sizes are in blaster units, x to the right, y down, z away from
     // the eye; the barrel points along +z. Each part has a colour and how
@@ -196,7 +194,6 @@
     const BLASTER_TANK_RGB = [40, 120, 255];
     const BLASTER_TANK_ALPHA = 0.8;
     const BLASTER_NOZZLE_TIP_Z = 0.7;
-    const NOZZLE_BUBBLE_MAX_RADIUS = 0.075;
 
     // How finely the tubes are built; balls are drawn as smooth shaded discs
     const BLASTER_CYLINDER_SEGMENTS = 36;
@@ -229,7 +226,32 @@
     const BUBBLE_SHINE_COLOR = "rgba(255, 255, 255, 0.9)";
     const BUBBLE_START_AHEAD_SQUARES = 0.3;
 
+    // A new bubble is drawn coming out of the blaster's nozzle: for its
+    // first BUBBLE_LAUNCH_MS it glides from the tip, where it is
+    // BUBBLE_LAUNCH_RADIUS across in blaster units, to where it really is
+    // in the maze, then flies on as normal. Only the drawing does this; the
+    // bubble's real path, and what it hits, is unchanged.
+    const BUBBLE_LAUNCH_MS = 200;
+    const BUBBLE_LAUNCH_RADIUS = 0.045;
+
     const DOT_COLOR = "#ffd700";
+
+    // Power pellets are swirled with the rainbow, turning once every
+    // PELLET_SPIN_MS; the first colour is repeated at the end so the swirl
+    // joins up
+    const PELLET_RAINBOW_COLORS = ["#ff3b3b", "#ff9f1c", "#ffe11c", "#3ad15a", "#2fa8ff", "#8a5cff", "#ff4fd8", "#ff3b3b"];
+    const PELLET_SPIN_MS = 1500;
+
+    // While powered up, a single rainbow ring travels smoothly up and down
+    // the blaster, from BACK_Z to FRONT_Z (blaster units along the barrel)
+    // and back once every BLASTER_RING_TRAVEL_MS. It is HALF_WIDTH either
+    // side of its middle, and its colours spin round once every SPIN_MS.
+    const BLASTER_RING_BACK_Z = -0.15;
+    const BLASTER_RING_FRONT_Z = 0.67;
+    const BLASTER_RING_HALF_WIDTH = 0.035;
+    const BLASTER_RING_TRAVEL_MS = 1600;
+    const BLASTER_RING_SPIN_MS = 2000;
+    const BLASTER_TUBE_SLICE_LENGTH = 0.03;
 
     // Enemies are drawn as their blocky 4x3 shape, in a canvas this many
     // pixels per block, then scaled into the view
@@ -747,6 +769,7 @@
             vx: faceX * BULLET_SPEED_SQUARES_PER_MS,
             vy: faceY * BULLET_SPEED_SQUARES_PER_MS,
             lastMs: nowMs,
+            bornMs: nowMs,
         };
         maze = { ...maze, bullets: [...maze.bullets, bullet] };
     }
@@ -1430,7 +1453,7 @@
         drawCeilingAndFloor(camera);
         const wallDepths = drawWalls(maze.walls, camera);
         drawWorldObjects(maze, camera, wallDepths, nowMs);
-        drawBubbleBlaster(maze, nowMs);
+        drawBubbleBlaster(maze, camera, nowMs);
         drawCrosshair();
         drawMinimap(maze, nowMs);
         drawStatusBar(nowMs);
@@ -1642,12 +1665,13 @@
         }
         for (const key of currentMaze.powerPellets) {
             const [x, y] = key.split(",").map(Number);
-            // Pellets pulse gently so they catch the eye down a corridor
-            const pulse = 1 + 0.15 * Math.sin(nowMs / 150);
-            objects.push({ x: x + 0.5, y: y + 0.5, kind: "ball", heightShare: DOT_HEIGHT_SHARE, radiusShare: POWER_PELLET_RADIUS_SHARE * pulse, color: DOT_COLOR });
+            objects.push({ x: x + 0.5, y: y + 0.5, kind: "pellet" });
         }
-        for (const { x, y } of currentMaze.bullets) {
-            objects.push({ x, y, kind: "bubble" });
+        // Bubbles still coming out of the nozzle are drawn with the blaster
+        for (const { x, y, bornMs } of currentMaze.bullets) {
+            if (nowMs - bornMs >= BUBBLE_LAUNCH_MS) {
+                objects.push({ x, y, kind: "bubble" });
+            }
         }
         getEnemyCenters(currentMaze, nowMs).forEach(({ x, y }, i) => {
             objects.push({ x, y, kind: "enemy", index: i });
@@ -1667,6 +1691,10 @@
                 drawWorldBubble(view, camera, wallDepths);
                 continue;
             }
+            if (object.kind === "pellet") {
+                drawWorldPellet(view, camera, wallDepths, nowMs);
+                continue;
+            }
             drawBall(object, view, camera, wallDepths);
         }
     }
@@ -1678,9 +1706,53 @@
         if (column < 0 || column >= VIEW_W || wallDepths[column] < view.depth) {
             return;
         }
+        const { x, y, radius } = getWorldBubbleOnScreen(view, camera);
+        drawBubble(x, y, radius, 1);
+    }
+
+    // A power pellet floating over the floor, pulsing gently so it catches
+    // the eye down a corridor, drawn only if no wall is in front of it
+    function drawWorldPellet(view, camera, wallDepths, nowMs) {
+        const column = Math.round(view.screenX);
+        if (column < 0 || column >= VIEW_W || wallDepths[column] < view.depth) {
+            return;
+        }
+        const pulse = 1 + 0.15 * Math.sin(nowMs / 150);
         const floorY = camera.horizonY + view.unitPx / 2;
-        const centerY = floorY - BULLET_HEIGHT_SHARE * view.unitPx;
-        drawBubble(view.screenX, centerY, Math.max(2, BULLET_RADIUS_SHARE * view.unitPx), 1);
+        const centerY = floorY - DOT_HEIGHT_SHARE * view.unitPx;
+        drawRainbowBall(view.screenX, centerY, Math.max(2, POWER_PELLET_RADIUS_SHARE * view.unitPx * pulse), nowMs);
+    }
+
+    // A ball swirled with every colour of the rainbow, slowly spinning, with
+    // a white shine on its top left
+    function drawRainbowBall(x, y, radius, nowMs) {
+        const spin = (nowMs / PELLET_SPIN_MS) * Math.PI * 2;
+        const rainbow = ctx.createConicGradient(spin, x, y);
+        PELLET_RAINBOW_COLORS.forEach((color, i) => {
+            rainbow.addColorStop(i / (PELLET_RAINBOW_COLORS.length - 1), color);
+        });
+        ctx.fillStyle = rainbow;
+        ctx.beginPath();
+        ctx.arc(x, y, radius, 0, Math.PI * 2);
+        ctx.fill();
+
+        const shine = ctx.createRadialGradient(x - radius * 0.35, y - radius * 0.4, 0, x - radius * 0.35, y - radius * 0.4, radius * 0.6);
+        shine.addColorStop(0, "rgba(255, 255, 255, 0.85)");
+        shine.addColorStop(1, "rgba(255, 255, 255, 0)");
+        ctx.fillStyle = shine;
+        ctx.beginPath();
+        ctx.arc(x, y, radius, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    // Where a bubble in the maze shows on screen, and how big
+    function getWorldBubbleOnScreen(view, camera) {
+        const floorY = camera.horizonY + view.unitPx / 2;
+        return {
+            x: view.screenX,
+            y: floorY - BULLET_HEIGHT_SHARE * view.unitPx,
+            radius: Math.max(2, BULLET_RADIUS_SHARE * view.unitPx),
+        };
     }
 
     // A soap bubble: see-through blue, a bright rim and a shine in its top
@@ -1762,15 +1834,20 @@
             return ENEMY_BODY_COLORS[index % ENEMY_BODY_COLORS.length];
         }
 
-        // Counting 250 ms blocks back from the end, odd blocks are white, so
-        // the first flash starts exactly FRIGHTENED_FLASH_FINAL_MS out and
-        // every flash and gap is a full block
-        const msLeft = currentMaze.frightenedUntilMs - nowMs;
-        const isFlashOn = Math.floor(msLeft / FRIGHTENED_FLASH_PERIOD_MS) % 2 === 1;
-        if (msLeft < FRIGHTENED_FLASH_FINAL_MS && isFlashOn) {
+        if (isPowerEndingFlash(currentMaze, nowMs)) {
             return FRIGHTENED_FLASH_COLOR;
         }
         return FRIGHTENED_ENEMY_COLOR;
+    }
+
+    // True during the flashes that warn the power is running out. Counting
+    // 250 ms blocks back from the end, odd blocks flash, so the first flash
+    // starts exactly FRIGHTENED_FLASH_FINAL_MS out and every flash and gap
+    // is a full block.
+    function isPowerEndingFlash(currentMaze, nowMs) {
+        const msLeft = currentMaze.frightenedUntilMs - nowMs;
+        const isFlashBlock = Math.floor(msLeft / FRIGHTENED_FLASH_PERIOD_MS) % 2 === 1;
+        return msLeft > 0 && msLeft < FRIGHTENED_FLASH_FINAL_MS && isFlashBlock;
     }
 
     // The enemy's blocky shape (a bar across the top and a leg down each
@@ -1795,12 +1872,29 @@
     // ---- The bubble blaster, a small 3D model ----
 
     // The guy's toy bubble blaster in the lower right of the view: swaying
-    // as he walks, kicking back when he fires, with the next bubble swelling
-    // at the nozzle and a pop ring just after a shot. Every face of the
-    // model is placed in front of the eye, lit, and drawn farthest first.
-    function drawBubbleBlaster(currentMaze, nowMs) {
+    // as he walks, kicking back when he fires, with a pop ring at the nozzle
+    // just after a shot. Every face of the model is placed in front of the
+    // eye, lit, and drawn farthest first.
+    function drawBubbleBlaster(currentMaze, camera, nowMs) {
         const placement = getBlasterPlacement(currentMaze, nowMs);
         const toEye = (point) => placeBlasterPoint(point, placement);
+
+        // While the guy is powered up, a single rainbow ring travels up and
+        // down the blaster, except during the flashes that warn the power is
+        // running out. Tube wall faces whose middle is within the ring take
+        // its colour: the hue goes round with the angle around the barrel, so
+        // the ring shows every colour, and slowly spins.
+        const isRingShowing = nowMs < currentMaze.frightenedUntilMs && !isPowerEndingFlash(currentMaze, nowMs);
+        const ringTravel = 0.5 - 0.5 * Math.cos((2 * Math.PI * nowMs) / BLASTER_RING_TRAVEL_MS);
+        const ringZ = BLASTER_RING_BACK_Z + (BLASTER_RING_FRONT_Z - BLASTER_RING_BACK_Z) * ringTravel;
+        const getFaceRgb = (part, faceIndex, modelCenter) => {
+            const isTubeWall = faceIndex < (part.wallFaceCount ?? 0);
+            if (!isRingShowing || !isTubeWall || Math.abs(modelCenter[2] - ringZ) > BLASTER_RING_HALF_WIDTH) {
+                return part.rgb;
+            }
+            const aroundDegrees = (Math.atan2(modelCenter[1], modelCenter[0]) * 180) / Math.PI;
+            return hueToRgb(aroundDegrees + (nowMs / BLASTER_RING_SPIN_MS) * 360);
+        };
 
         // Every face of every tube and box, and every ball, as one list to
         // draw farthest first
@@ -1810,7 +1904,7 @@
                 return [{ depth: partCenter[2], draw: () => drawShadedBall(partCenter, part.radius, part.rgb, part.alpha) }];
             }
             return part.faces
-                .map((face) => {
+                .map((face, faceIndex) => {
                     const points = face.map(toEye);
                     const center = averagePoints(points);
                     let normal = normalizeVector(getPolygonNormal(points));
@@ -1819,12 +1913,12 @@
                     if (dotProduct(normal, subtractVectors(center, partCenter)) < 0) {
                         normal = normal.map((value) => -value);
                     }
-                    return { points, center, normal };
+                    return { points, center, normal, rgb: getFaceRgb(part, faceIndex, averagePoints(face)) };
                 })
                 // Faces turned away are hidden on solid parts, but on
                 // see-through parts they are the inside walls showing through
                 .filter(({ center, normal }) => dotProduct(normal, center) < 0 || part.alpha < 1)
-                .map(({ points, center, normal }) => {
+                .map(({ points, center, normal, rgb }) => {
                     // An inside wall is lit from the side facing the eye
                     let litNormal = normal;
                     if (dotProduct(normal, center) > 0) {
@@ -1832,7 +1926,7 @@
                     }
                     return {
                         depth: center[2],
-                        draw: () => drawShadedFace(points, getLitColor(part.rgb, litNormal, center), part.alpha),
+                        draw: () => drawShadedFace(points, getLitColor(rgb, litNormal, center), part.alpha),
                     };
                 });
         });
@@ -1842,7 +1936,37 @@
             drawPiece();
         }
 
-        drawNozzleBubble(placement, nowMs);
+        drawNozzlePop(placement, nowMs);
+        drawLaunchingBubbles(currentMaze, placement, camera, nowMs);
+    }
+
+    // Bubbles just fired, drawn in front of the blaster gliding from its
+    // nozzle tip to where they really are in the maze, growing as they go.
+    // They ease out, moving fast at first and settling into their path.
+    function drawLaunchingBubbles(currentMaze, placement, camera, nowMs) {
+        const tip = placeBlasterPoint([0, 0, BLASTER_NOZZLE_TIP_Z + BUBBLE_LAUNCH_RADIUS], placement);
+        const [tipX, tipY] = projectBlasterPoint(tip);
+        const tipRadius = (BLASTER_FOCAL_PX * BUBBLE_LAUNCH_RADIUS) / tip[2];
+
+        for (const { x, y, bornMs } of currentMaze.bullets) {
+            const launchShare = (nowMs - bornMs) / BUBBLE_LAUNCH_MS;
+            if (launchShare >= 1) {
+                continue;
+            }
+            const eased = 1 - (1 - launchShare) ** 2;
+
+            let target = { x: tipX, y: tipY, radius: tipRadius };
+            const view = projectPoint(camera, x, y);
+            if (view !== null) {
+                target = getWorldBubbleOnScreen(view, camera);
+            }
+            drawBubble(
+                tipX + (target.x - tipX) * eased,
+                tipY + (target.y - tipY) * eased,
+                tipRadius + (target.radius - tipRadius) * eased,
+                1
+            );
+        }
     }
 
     // One flat face of the blaster, as solid as alpha says. Solid faces get
@@ -1944,21 +2068,8 @@
         return `rgb(${Math.round(r)}, ${Math.round(g)}, ${Math.round(b)})`;
     }
 
-    // The next bubble, swelling at the nozzle as the blaster gets ready and
-    // wobbling gently once it is ready, then a pop ring after a shot
-    function drawNozzleBubble(placement, nowMs) {
-        const readiness = clamp((nowMs - lastShotMs) / SHOT_COOLDOWN_MS, 0, 1);
-        let radius = NOZZLE_BUBBLE_MAX_RADIUS * readiness;
-        if (readiness === 1) {
-            radius *= 1 + 0.05 * Math.sin(nowMs / 120);
-        }
-
-        if (radius > 0.004) {
-            const center = placeBlasterPoint([0, 0, BLASTER_NOZZLE_TIP_Z + radius * 0.8], placement);
-            const [x, y] = projectBlasterPoint(center);
-            drawBubble(x, y, (BLASTER_FOCAL_PX * radius) / center[2], 1);
-        }
-
+    // A ring spreading out from the nozzle and fading, just after a shot
+    function drawNozzlePop(placement, nowMs) {
         const sinceShotMs = nowMs - lastShotMs;
         if (sinceShotMs < NOZZLE_POP_MS) {
             const popShare = sinceShotMs / NOZZLE_POP_MS;
@@ -2018,22 +2129,34 @@
     }
 
     // A tube along the barrel line from zStart to zEnd, its radius going
-    // from radiusStart to radiusEnd (so it can flare), with both ends capped
+    // from radiusStart to radiusEnd (so it can flare), with both ends capped.
+    // Its wall is cut into slices no longer than BLASTER_TUBE_SLICE_LENGTH,
+    // so the rainbow ring can light up just a thin band of it. The wall
+    // faces are listed apart from the caps, as only the wall takes the ring.
     function createCylinderPart(radiusStart, radiusEnd, zStart, zEnd, rgb, alpha) {
-        const ringPoint = (radius, z, i) => {
+        const sliceCount = Math.max(1, Math.ceil((zEnd - zStart) / BLASTER_TUBE_SLICE_LENGTH));
+        const ringPoint = (slice, i) => {
+            const share = slice / sliceCount;
+            const radius = radiusStart + (radiusEnd - radiusStart) * share;
             const angle = (2 * Math.PI * i) / BLASTER_CYLINDER_SEGMENTS;
-            return [radius * Math.cos(angle), radius * Math.sin(angle), z];
+            return [radius * Math.cos(angle), radius * Math.sin(angle), zStart + (zEnd - zStart) * share];
         };
         const indexes = [...Array(BLASTER_CYLINDER_SEGMENTS).keys()];
-        const sides = indexes.map((i) => [
-            ringPoint(radiusStart, zStart, i),
-            ringPoint(radiusStart, zStart, i + 1),
-            ringPoint(radiusEnd, zEnd, i + 1),
-            ringPoint(radiusEnd, zEnd, i),
-        ]);
-        const startCap = indexes.map((i) => ringPoint(radiusStart, zStart, i));
-        const endCap = indexes.map((i) => ringPoint(radiusEnd, zEnd, i));
-        return { faces: [...sides, startCap, endCap], rgb, alpha, center: [0, 0, (zStart + zEnd) / 2] };
+        const wallFaces = [...Array(sliceCount).keys()].flatMap((slice) => indexes.map((i) => [
+            ringPoint(slice, i),
+            ringPoint(slice, i + 1),
+            ringPoint(slice + 1, i + 1),
+            ringPoint(slice + 1, i),
+        ]));
+        const startCap = indexes.map((i) => ringPoint(0, i));
+        const endCap = indexes.map((i) => ringPoint(sliceCount, i));
+        return {
+            faces: [...wallFaces, startCap, endCap],
+            wallFaceCount: wallFaces.length,
+            rgb,
+            alpha,
+            center: [0, 0, (zStart + zEnd) / 2],
+        };
     }
 
     // A polygon's facing direction (not yet unit length), worked out from
@@ -2059,6 +2182,17 @@
 
     function dotProduct(a, b) {
         return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    }
+
+    // A bright, fully saturated colour for a hue in degrees (any number,
+    // wrapping round the colour wheel), as [r, g, b]
+    function hueToRgb(hue) {
+        const wrapped = ((hue % 360) + 360) % 360;
+        const channel = (offset) => {
+            const k = (offset + wrapped / 60) % 6;
+            return 255 * (1 - Math.max(0, Math.min(k, 4 - k, 1)));
+        };
+        return [channel(5), channel(3), channel(1)];
     }
 
     function normalizeVector(vector) {
@@ -2096,15 +2230,15 @@
         drawMapWalls(currentMaze.walls);
 
         ctx.fillStyle = DOT_COLOR;
-        const circles = [
-            ...[...currentMaze.dots].map((key) => [key, MAP_DOT_RADIUS_PX]),
-            ...[...currentMaze.powerPellets].map((key) => [key, MAP_PELLET_RADIUS_PX]),
-        ];
-        for (const [key, radius] of circles) {
+        for (const key of currentMaze.dots) {
             const [x, y] = key.split(",").map(Number);
             ctx.beginPath();
-            ctx.arc((x + 0.5) * MAP_CELL_W, (y + 0.5) * MAP_CELL_H, radius, 0, Math.PI * 2);
+            ctx.arc((x + 0.5) * MAP_CELL_W, (y + 0.5) * MAP_CELL_H, MAP_DOT_RADIUS_PX, 0, Math.PI * 2);
             ctx.fill();
+        }
+        for (const key of currentMaze.powerPellets) {
+            const [x, y] = key.split(",").map(Number);
+            drawRainbowBall((x + 0.5) * MAP_CELL_W, (y + 0.5) * MAP_CELL_H, MAP_PELLET_RADIUS_PX, nowMs);
         }
 
         getEnemyDrawSquares(currentMaze, nowMs).forEach(([x, y], i) => {
