@@ -65,8 +65,12 @@
     // Up/W walks forward, Down/S back, A/D step sideways; steps chain at a
     // steady speed while a key is held. The guy's clock runs every
     // GUY_UPDATE_INTERVAL_MS.
-    const GUY_STEP_MS = 300;
+    const GUY_STEP_MS = 450;
     const GUY_UPDATE_INTERVAL_MS = 16;
+
+    // On a phone, a touch held still this long becomes a hold (walking)
+    // rather than a tap
+    const TOUCH_HOLD_MS = 180;
 
     // He only ever faces along the grid. Each press of Left/Right turns him
     // exactly 90 degrees, the view gliding round over GUY_TURN_MS. A turn
@@ -101,7 +105,7 @@
     const CONTROLS_HINTS = {
         keyboard: "Up/Down or W/S: walk   Left/Right: turn   A/D: step sideways   Space: blow bubbles",
         gamepad: "D-pad up/down: walk   D-pad left/right: turn   LB/RB: step sideways   A: blow bubbles",
-        touch: "Swipe up: walk   Swipe down: stop or step back   Swipe left/right: turn   Tap: blow bubbles",
+        touch: "Hold: walk   Swipe up/down: one step   Swipe left/right: turn   Tap: blow bubbles",
     };
 
     // Keys held to walk: forward/back and sideways step
@@ -388,12 +392,13 @@
     // Movement keys currently held
     let heldKeys = new Set();
 
-    // Phone swipes: where the current touch began; whether a swipe up has
-    // him walking on his own; and whether a swipe down asked for one step
-    // back
+    // Phone: where the current touch began; the timer that turns a still
+    // touch into a hold; whether a hold has him walking; and a single step
+    // asked for by a swipe up (1) or down (-1), or 0 for none
     let touchStart = null;
-    let isAutoWalking = false;
-    let isBackStepWaiting = false;
+    let touchHoldTimerId = null;
+    let isTouchHolding = false;
+    let touchStepWaiting = 0;
 
     // Game controller: walking from its D-pad and shoulder buttons, and
     // which buttons were down last time it was read, to spot new presses
@@ -482,23 +487,40 @@
     });
     window.addEventListener("keydown", beginPlaying, { capture: true });
 
-    // ---- Phone: swipes and taps ----
-    // Swipe up to start walking (he keeps going on his own), swipe left or
-    // right to make a quarter turn, swipe down to stop or, when already
-    // stopped, step back a square. A tap blows a bubble, and starts or
-    // restarts the game.
+    // ---- Phone: holds, swipes and taps ----
+    // Press and hold anywhere to walk forward; let go to stop. Swipe up or
+    // down for one step forward or back, and left or right for a quarter
+    // turn. A quick tap blows a bubble, and starts or restarts the game. A
+    // touch counts as a hold once it has stayed still for TOUCH_HOLD_MS.
     window.addEventListener("touchstart", (event) => {
         event.preventDefault();
         const touch = event.changedTouches[0];
-        touchStart = { x: touch.clientX, y: touch.clientY, ms: performance.now() };
+        touchStart = { x: touch.clientX, y: touch.clientY };
+        lastInputKind = "touch";
+        clearTimeout(touchHoldTimerId);
+        touchHoldTimerId = setTimeout(() => {
+            if (touchStart !== null && hasStarted && !isDead) {
+                isTouchHolding = true;
+            }
+        }, TOUCH_HOLD_MS);
     }, { passive: false });
 
+    // A finger that moves far enough is a swipe, never a hold
     window.addEventListener("touchmove", (event) => {
         event.preventDefault();
+        const touch = event.changedTouches[0];
+        if (touchStart === null || isTouchHolding) {
+            return;
+        }
+        const distance = Math.hypot(touch.clientX - touchStart.x, touch.clientY - touchStart.y);
+        if (distance >= SWIPE_MIN_DISTANCE_PX) {
+            clearTimeout(touchHoldTimerId);
+        }
     }, { passive: false });
 
     window.addEventListener("touchend", (event) => {
         event.preventDefault();
+        clearTimeout(touchHoldTimerId);
         if (touchStart === null) {
             return;
         }
@@ -506,9 +528,14 @@
         const dx = touch.clientX - touchStart.x;
         const dy = touch.clientY - touchStart.y;
         const isTap = Math.hypot(dx, dy) < SWIPE_MIN_DISTANCE_PX;
+        const wasHolding = isTouchHolding;
         touchStart = null;
-        lastInputKind = "touch";
+        isTouchHolding = false;
 
+        // Letting go of a hold just stops him walking
+        if (wasHolding) {
+            return;
+        }
         if (!hasStarted) {
             beginPlaying();
             return;
@@ -528,15 +555,7 @@
             queueTurn(Math.sign(dx));
             return;
         }
-        if (dy < 0) {
-            isAutoWalking = true;
-            return;
-        }
-        if (isAutoWalking) {
-            isAutoWalking = false;
-        } else {
-            isBackStepWaiting = true;
-        }
+        touchStepWaiting = -Math.sign(dy);
     }, { passive: false });
 
     // ---- Game controller ----
@@ -632,8 +651,7 @@
     function startLevel() {
         isDead = false;
         maze = createMaze();
-        isAutoWalking = false;
-        isBackStepWaiting = false;
+        touchStepWaiting = 0;
 
         enemyTickCount = 0;
         clearInterval(enemyTimerId);
@@ -733,8 +751,8 @@
             }
 
             current = { ...current, guy: moveGuyOnFromSquare(current.walls, current.guy, nowMs) };
-            // A swipe-down step back is tried once, then forgotten
-            isBackStepWaiting = false;
+            // A swiped single step is tried once, then forgotten
+            touchStepWaiting = 0;
         }
 
         const collision = resolveCollisions(current, nowMs);
@@ -863,14 +881,11 @@
                 controls[control] = clamp(controls[control] + amount, -1, 1);
             }
         }
-        // A phone swipe up keeps him walking; a swipe down while stopped
-        // asks for one step back
-        let touchForward = 0;
-        if (isAutoWalking) {
+        // On a phone, a hold walks him forward, and a swipe up or down asks
+        // for one step
+        let touchForward = touchStepWaiting;
+        if (isTouchHolding) {
             touchForward = 1;
-        }
-        if (isBackStepWaiting) {
-            touchForward = -1;
         }
         return {
             forward: clamp(controls.forward + gamepadControls.forward + touchForward, -1, 1),
