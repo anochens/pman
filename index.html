@@ -53,30 +53,24 @@
 
     // ---- The guy (you) ----
 
-    // You see the maze through the guy's eyes. Up/W walks forward, Down/S
-    // back, A/D step sideways. Speeds are per millisecond; the guy's clock
-    // runs every GUY_UPDATE_INTERVAL_MS.
-    const GUY_WALK_SPEED_SQUARES_PER_MS = 0.0032;
-    const GUY_RADIUS_SQUARES = 0.22;
+    // You see the maze through the guy's eyes. He always moves whole
+    // squares, gliding from the middle of one square to the middle of the
+    // next over GUY_STEP_MS, so he never stops between squares. Holding
+    // Up/W walks forward, Down/S back, A/D step sideways; steps chain at a
+    // steady speed while a key is held. The guy's clock runs every
+    // GUY_UPDATE_INTERVAL_MS.
+    const GUY_STEP_MS = 300;
     const GUY_UPDATE_INTERVAL_MS = 16;
 
     // He only ever faces along the grid. Each press of Left/Right turns him
-    // exactly 90 degrees, the view gliding round over GUY_TURN_MS.
+    // exactly 90 degrees, the view gliding round over GUY_TURN_MS. A turn
+    // pressed mid-step waits until he reaches the middle of the next square.
     const GUY_TURN_MS = 600;
 
     // Walking waits until a turn's swing is this far through, so he never
     // walks one way while the view still points another
     const GUY_TURN_WALK_SHARE = 0.5;
     const TURN_KEYS = { ArrowLeft: -1, ArrowRight: 1 };
-
-    // While he walks, he is drawn toward the middle of the corridor at this
-    // speed, so he passes straight through each square and lines up with
-    // side passages
-    const GUY_CENTERING_SPEED_SQUARES_PER_MS = 0.004;
-
-    // Longest gap the guy's clock will catch up on in one go, so a stall
-    // (a background tab, say) can't fling him through a wall
-    const GUY_MAX_UPDATE_GAP_MS = 50;
 
     // Keys held to walk: forward/back and sideways step
     const MOVE_KEYS = {
@@ -157,6 +151,7 @@
     const MORTAR_SHARE = 0.08;
     const BRICK_SHADE_VARIATION = 0.18;
     const SIDE_WALL_SHADE = 0.72;
+    const WALL_STRIP_OVERLAP_W = 1.05;
 
     const CEILING_TOP_COLOR = "#05050a";
     const CEILING_HORIZON_COLOR = "#1b1b26";
@@ -218,6 +213,13 @@
     const MAP_FACING_WEDGE_COLOR = "#ffffff";
 
     const HUD_HEIGHT_PX = 56;
+
+    // The whole game (view plus status bar) is laid out at GAME_W by GAME_H
+    // and scaled up or down to fill the window, keeping its shape and
+    // centred, with black borders where the window's shape differs. It is
+    // drawn at the screen's real resolution, so text stays sharp.
+    const GAME_W = VIEW_W;
+    const GAME_H = VIEW_H + HUD_HEIGHT_PX;
     const HUD_BACKGROUND_COLOR = "#1a1410";
     const HUD_TEXT_COLOR = "#e8d9b0";
 
@@ -235,14 +237,18 @@
     // The maze for this level, holding:
     //   walls, dots,
     //   powerPellets        Sets of "x,y" keys of squares
-    //   guy                 { x, y, angle, turnFromAngle, turnStartMs }:
-    //                       position in squares; angle is the way he faces,
-    //                       always a multiple of 90 degrees in radians (0 is
-    //                       east, y grows south, kept unwrapped so turns
-    //                       always swing the short way); the view swings
-    //                       from turnFromAngle to angle, starting at turnStartMs
-    //   walkDistance        how far the guy has walked, for his head bob
-    //   lastWalkMs          when he last moved, for his head bob
+    //   guy                 the guy:
+    //     squareX, squareY    the square he is in, or stepping into
+    //     fromX, fromY        middle of the square his current step left from
+    //     stepStartMs         when his current (or last) step began
+    //     stepCount           steps taken this level, for his head bob
+    //     angle               the way he faces, always a multiple of 90
+    //                         degrees in radians (0 is east, y grows south,
+    //                         kept unwrapped so turns swing the short way)
+    //     turnFromAngle,      the view swings from turnFromAngle to angle,
+    //     turnStartMs         starting at turnStartMs
+    //     queuedTurn          a turn (1 right, -1 left, 0 none) pressed
+    //                         mid-step, waiting for him to reach a square
     //   enemies             [x, y] squares
     //   enemySlides         per enemy: where its slide started, when, how long
     //   frightenedUntilMs   when the power runs out
@@ -252,9 +258,12 @@
     //                       squares per ms
     let maze = null;
 
+    // How the game is fitted into the window: its scale and where its
+    // top-left corner sits, in canvas pixels. Set by resizeCanvas.
+    let gameTransform = { scale: 1, offsetX: 0, offsetY: 0 };
+
     // Movement keys currently held
     let heldKeys = new Set();
-    let lastGuyUpdateMs = performance.now();
 
     let lastShotMs = -Infinity;
 
@@ -281,11 +290,18 @@
             heldKeys = new Set([...heldKeys, event.key]);
             return;
         }
-        // One quarter turn per press; holding the key doesn't keep spinning
+        // One quarter turn per press; holding the key doesn't keep spinning.
+        // He turns now if he is standing in a square, or as soon as he
+        // reaches the middle of the square he is stepping into.
         if (event.key in TURN_KEYS) {
             event.preventDefault();
             if (!event.repeat && !isDead) {
-                maze = { ...maze, guy: turnGuy(maze.guy, TURN_KEYS[event.key], performance.now()) };
+                const nowMs = performance.now();
+                let guy = { ...maze.guy, queuedTurn: TURN_KEYS[event.key] };
+                if (!isGuyMidStep(guy, nowMs)) {
+                    guy = turnGuy(maze.guy, TURN_KEYS[event.key], nowMs);
+                }
+                maze = { ...maze, guy };
             }
             return;
         }
@@ -340,14 +356,17 @@
             dots,
             powerPellets,
             guy: {
-                x: GUY_START_SQUARE[0] + 0.5,
-                y: GUY_START_SQUARE[1] + 0.5,
+                squareX: GUY_START_SQUARE[0],
+                squareY: GUY_START_SQUARE[1],
+                fromX: GUY_START_SQUARE[0] + 0.5,
+                fromY: GUY_START_SQUARE[1] + 0.5,
+                stepStartMs: -Infinity,
+                stepCount: 0,
                 angle: startAngle,
                 turnFromAngle: startAngle,
                 turnStartMs: -Infinity,
+                queuedTurn: 0,
             },
-            walkDistance: 0,
-            lastWalkMs: -Infinity,
             enemies,
             enemySlides: enemies.map(([x, y]) => ({ fromX: x, fromY: y, startMs: -Infinity, durationMs: 1 })),
             frightenedUntilMs: -Infinity,
@@ -379,34 +398,110 @@
         return bestAngle;
     }
 
-    // The guy's clock: walks him for the time since it last ran, then sorts
-    // out any enemy he has run into and eats what is on his
-    // square. Clearing the last dot and pellet starts the next level.
+    // The guy's clock. Whenever he is standing in the middle of a square he
+    // eats what is there, takes any turn that was waiting, and starts his
+    // next step if a walking key is held. Then any enemy that has reached
+    // him is sorted out. Clearing the last dot and pellet starts the next
+    // level.
     function stepGuy() {
         const nowMs = performance.now();
-        const elapsedMs = Math.min(nowMs - lastGuyUpdateMs, GUY_MAX_UPDATE_GAP_MS);
-        lastGuyUpdateMs = nowMs;
         if (isDead) {
             return;
         }
 
-        const controls = getControls();
-        const walked = walkGuy(maze, controls, elapsedMs, nowMs);
-        const collision = resolveCollisions(walked, nowMs);
-        score += collision.points;
-        if (collision.isCaught) {
-            maze = collision.maze;
-            isDead = true;
-            return;
+        let current = maze;
+        if (!isGuyMidStep(current.guy, nowMs)) {
+            const meal = eatAtGuy(current, nowMs);
+            current = meal.maze;
+            score += meal.points;
+            if (current.dots.size === 0 && current.powerPellets.size === 0) {
+                level++;
+                startLevel();
+                return;
+            }
+
+            let guy = current.guy;
+            if (guy.queuedTurn !== 0) {
+                guy = turnGuy(guy, guy.queuedTurn, nowMs);
+            }
+            current = { ...current, guy: startNextStep(current.walls, guy, getControls(), nowMs) };
         }
 
-        const meal = eatAtGuy(collision.maze, nowMs);
-        maze = meal.maze;
-        score += meal.points;
-        if (maze.dots.size === 0 && maze.powerPellets.size === 0) {
-            level++;
-            startLevel();
+        const collision = resolveCollisions(current, nowMs);
+        maze = collision.maze;
+        score += collision.points;
+        if (collision.isCaught) {
+            isDead = true;
         }
+    }
+
+    function isGuyMidStep(guy, nowMs) {
+        return nowMs < guy.stepStartMs + GUY_STEP_MS;
+    }
+
+    // The guy setting off on his next step: forward or back the way he
+    // faces, or else sideways along his right hand, if a key for it is
+    // held, that square is open, and any turn has swung far enough round.
+    // Otherwise he stays as he is. A step that follows straight on from the
+    // last one starts exactly when it ended, so his speed stays steady.
+    function startNextStep(walls, guy, { forward, strafe }, nowMs) {
+        if (getSlideProgress(guy.turnStartMs, GUY_TURN_MS, nowMs) < GUY_TURN_WALK_SHARE) {
+            return guy;
+        }
+
+        // His facing as a whole grid step, e.g. [0, -1] for north
+        const faceX = Math.round(Math.cos(guy.angle));
+        const faceY = Math.round(Math.sin(guy.angle));
+        let direction = [faceX * forward, faceY * forward];
+        if (forward === 0) {
+            direction = [-faceY * strafe, faceX * strafe];
+        }
+        if (direction[0] === 0 && direction[1] === 0) {
+            return guy;
+        }
+
+        const next = getStepDestination(walls, guy.squareX, guy.squareY, direction[0], direction[1]);
+        if (next === null) {
+            return guy;
+        }
+
+        const lastStepEndMs = guy.stepStartMs + GUY_STEP_MS;
+        let stepStartMs = nowMs;
+        if (nowMs - lastStepEndMs < 2 * GUY_UPDATE_INTERVAL_MS) {
+            stepStartMs = lastStepEndMs;
+        }
+        return {
+            ...guy,
+            fromX: guy.squareX + 0.5,
+            fromY: guy.squareY + 0.5,
+            squareX: next[0],
+            squareY: next[1],
+            stepStartMs,
+            stepCount: guy.stepCount + 1,
+        };
+    }
+
+    // Where the guy is right now, in squares: part way along his step from
+    // the middle of one square to the middle of the next, or in the middle
+    // of his square when standing. A step through the tunnel goes the short
+    // way, off one edge and on at the other.
+    function getGuyPosition(guy, nowMs) {
+        const t = getSlideProgress(guy.stepStartMs, GUY_STEP_MS, nowMs);
+        const toX = guy.squareX + 0.5;
+        const toY = guy.squareY + 0.5;
+        const x = guy.fromX + getWrappedDeltaX(guy.fromX, toX) * t;
+        return { x: (x + WORLD_COLS) % WORLD_COLS, y: guy.fromY + (toY - guy.fromY) * t };
+    }
+
+    // How many squares the guy has walked this level, counting part of a
+    // step, or null if he has stood still a moment; this drives his head
+    // bob and the sway of his gun
+    function getGuyWalkDistance(guy, nowMs) {
+        const isWalking = nowMs < guy.stepStartMs + GUY_STEP_MS + WALK_BOB_LINGER_MS;
+        if (!isWalking) {
+            return null;
+        }
+        return guy.stepCount - 1 + getSlideProgress(guy.stepStartMs, GUY_STEP_MS, nowMs);
     }
 
     // How the held keys add up: forward (+1) or back (-1), and step right
@@ -421,15 +516,16 @@
         return controls;
     }
 
-    // The guy a quarter turn to the right (direction 1) or left (-1). The
-    // view swings round from wherever it is right now, so a second press
-    // mid-swing carries on smoothly.
+    // The guy a quarter turn to the right (direction 1) or left (-1), with
+    // no turn left waiting. The view swings round from wherever it is right
+    // now, so a second press mid-swing carries on smoothly.
     function turnGuy(guy, direction, nowMs) {
         return {
             ...guy,
             angle: guy.angle + (direction * Math.PI) / 2,
             turnFromAngle: getGuyViewAngle(guy, nowMs),
             turnStartMs: nowMs,
+            queuedTurn: 0,
         };
     }
 
@@ -440,68 +536,6 @@
         const progress = getSlideProgress(guy.turnStartMs, GUY_TURN_MS, nowMs);
         const eased = progress * progress * (3 - 2 * progress);
         return guy.turnFromAngle + (guy.angle - guy.turnFromAngle) * eased;
-    }
-
-    // The maze with the guy walked for elapsedMs, along the grid: forward
-    // and back the way he faces, sideways along his right hand. He slides
-    // along walls rather than stopping dead against them, and is drawn to
-    // the middle of the corridor across the way he walks.
-    function walkGuy(currentMaze, { forward, strafe }, elapsedMs, nowMs) {
-        const { guy } = currentMaze;
-        if (getSlideProgress(guy.turnStartMs, GUY_TURN_MS, nowMs) < GUY_TURN_WALK_SHARE) {
-            return currentMaze;
-        }
-
-        // His facing as a whole grid step, e.g. [0, -1] for north
-        const faceX = Math.round(Math.cos(guy.angle));
-        const faceY = Math.round(Math.sin(guy.angle));
-        let moveX = faceX * forward - faceY * strafe;
-        let moveY = faceY * forward + faceX * strafe;
-
-        // Walking and stepping sideways at once is no faster than either
-        const moveLength = Math.hypot(moveX, moveY);
-        if (moveLength > 1) {
-            moveX /= moveLength;
-            moveY /= moveLength;
-        }
-        const stepLength = GUY_WALK_SPEED_SQUARES_PER_MS * elapsedMs;
-        const centeringStep = GUY_CENTERING_SPEED_SQUARES_PER_MS * elapsedMs;
-
-        let startX = guy.x;
-        let startY = guy.y;
-        if (moveX !== 0 && moveY === 0) {
-            startY = moveToward(guy.y, Math.floor(guy.y) + 0.5, centeringStep);
-        }
-        if (moveY !== 0 && moveX === 0) {
-            startX = moveToward(guy.x, Math.floor(guy.x) + 0.5, centeringStep);
-        }
-
-        // Each axis moves separately, so a blocked one doesn't stop the other
-        let x = startX + moveX * stepLength;
-        if (isBlockedForGuy(currentMaze.walls, x, startY)) {
-            x = startX;
-        }
-        let y = startY + moveY * stepLength;
-        if (isBlockedForGuy(currentMaze.walls, x, y)) {
-            y = startY;
-        }
-        x = (x + WORLD_COLS) % WORLD_COLS;
-
-        const walkedSquares = Math.hypot(getWrappedDeltaX(guy.x, x), y - guy.y);
-        let { walkDistance, lastWalkMs } = currentMaze;
-        if (walkedSquares > 0) {
-            walkDistance += walkedSquares;
-            lastWalkMs = nowMs;
-        }
-
-        return { ...currentMaze, guy: { ...guy, x, y }, walkDistance, lastWalkMs };
-    }
-
-    // True if the guy, standing at (x, y), would overlap a wall
-    function isBlockedForGuy(walls, x, y) {
-        const r = GUY_RADIUS_SQUARES;
-        return [[x - r, y - r], [x + r, y - r], [x - r, y + r], [x + r, y + r]]
-            .some(([cornerX, cornerY]) => isWallAt(walls, Math.floor(cornerX), Math.floor(cornerY)));
     }
 
     // True if the square is a wall. Above and below the maze counts as wall;
@@ -550,26 +584,34 @@
         return LEVEL_1_ENEMY_STEP_INTERVAL_MS / ENEMY_SPEEDUP_PER_LEVEL ** (level - 1);
     }
 
+    // Sizes the canvas to the window in real screen pixels (so it stays sharp
+    // on high-density screens) and works out how to fit the game into it
     function resizeCanvas() {
-        canvas.width = window.innerWidth;
-        canvas.height = window.innerHeight;
+        const pixelRatio = window.devicePixelRatio || 1;
+        canvas.width = Math.round(window.innerWidth * pixelRatio);
+        canvas.height = Math.round(window.innerHeight * pixelRatio);
+        canvas.style.width = `${window.innerWidth}px`;
+        canvas.style.height = `${window.innerHeight}px`;
+
+        const scale = Math.min(canvas.width / GAME_W, canvas.height / GAME_H);
+        gameTransform = {
+            scale,
+            offsetX: (canvas.width - GAME_W * scale) / 2,
+            offsetY: (canvas.height - GAME_H * scale) / 2,
+        };
     }
 
     function clamp(value, min, max) {
         return Math.min(Math.max(value, min), max);
     }
 
-    // value moved toward target by at most maxStep, without overshooting
-    function moveToward(value, target, maxStep) {
-        return value + clamp(target - value, -maxStep, maxStep);
-    }
-
     function wallKey(squareX, squareY) {
         return `${squareX},${squareY}`;
     }
 
+    // The square the guy is in, or stepping into; enemies chase this square
     function getGuySquare(currentMaze) {
-        return [Math.floor(currentMaze.guy.x), Math.floor(currentMaze.guy.y)];
+        return [currentMaze.guy.squareX, currentMaze.guy.squareY];
     }
 
     // ---- Shooting ----
@@ -581,7 +623,8 @@
             return;
         }
         lastShotMs = nowMs;
-        const { x, y, angle } = maze.guy;
+        const { x, y } = getGuyPosition(maze.guy, nowMs);
+        const { angle } = maze.guy;
         const bullet = {
             x,
             y,
@@ -680,7 +723,7 @@
     // is eaten: the guy scores and it starts walking back. Enemies already
     // walking back are harmless. Any other enemy catches him.
     function resolveCollisions(currentMaze, nowMs) {
-        const { x: guyX, y: guyY } = currentMaze.guy;
+        const { x: guyX, y: guyY } = getGuyPosition(currentMaze.guy, nowMs);
         let updated = currentMaze;
         let points = 0;
 
@@ -1245,7 +1288,19 @@
     }
 
     function draw(nowMs) {
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.fillStyle = "#000";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // Everything below is drawn in game coordinates, scaled and centred
+        const { scale, offsetX, offsetY } = gameTransform;
+        ctx.setTransform(scale, 0, 0, scale, offsetX, offsetY);
+
+        // Keep the game inside its own area, so nothing spills into the borders
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(0, 0, GAME_W, GAME_H);
+        ctx.clip();
 
         const camera = getCamera(maze, nowMs);
         drawCeilingAndFloor(camera);
@@ -1259,6 +1314,8 @@
         if (isDead) {
             drawDeathMessage();
         }
+
+        ctx.restore();
     }
 
     // Where the guy's eye is and which way it looks, as used for every ray:
@@ -1266,13 +1323,14 @@
     // the half-width of the view one square ahead. horizonY is the screen
     // row of eye level, bobbing as he walks.
     function getCamera(currentMaze, nowMs) {
-        const { x, y } = currentMaze.guy;
+        const { x, y } = getGuyPosition(currentMaze.guy, nowMs);
         const angle = getGuyViewAngle(currentMaze.guy, nowMs);
         const planeLength = Math.tan(FIELD_OF_VIEW_RADIANS / 2);
 
         let bob = 0;
-        if (nowMs - currentMaze.lastWalkMs < WALK_BOB_LINGER_MS) {
-            bob = HEAD_BOB_PX * Math.sin(currentMaze.walkDistance * HEAD_BOB_PER_SQUARE * Math.PI);
+        const walkDistance = getGuyWalkDistance(currentMaze.guy, nowMs);
+        if (walkDistance !== null) {
+            bob = HEAD_BOB_PX * Math.sin(walkDistance * HEAD_BOB_PER_SQUARE * Math.PI);
         }
 
         return {
@@ -1402,11 +1460,13 @@
                 rgb = WALL_BASE_RGB.map((channel) => channel * (1 + variation));
             }
             ctx.fillStyle = toColor(rgb, light);
-            ctx.fillRect(column, rowTop, 1, rowHeight + 0.5);
+            // Strips overlap a touch so no hairline gaps show between them
+            // once the game is scaled to the window
+            ctx.fillRect(column, rowTop, WALL_STRIP_OVERLAP_W, rowHeight + 0.5);
 
             // Mortar line along the bottom of each row of bricks
             ctx.fillStyle = toColor(MORTAR_RGB, light);
-            ctx.fillRect(column, rowTop + rowHeight * (1 - MORTAR_SHARE), 1, rowHeight * MORTAR_SHARE + 0.5);
+            ctx.fillRect(column, rowTop + rowHeight * (1 - MORTAR_SHARE), WALL_STRIP_OVERLAP_W, rowHeight * MORTAR_SHARE + 0.5);
         }
     }
 
@@ -1578,8 +1638,9 @@
     function drawGun(currentMaze, nowMs) {
         let swayX = 0;
         let swayY = 0;
-        if (nowMs - currentMaze.lastWalkMs < WALK_BOB_LINGER_MS) {
-            const phase = currentMaze.walkDistance * HEAD_BOB_PER_SQUARE * Math.PI;
+        const walkDistance = getGuyWalkDistance(currentMaze.guy, nowMs);
+        if (walkDistance !== null) {
+            const phase = walkDistance * HEAD_BOB_PER_SQUARE * Math.PI;
             swayX = 10 * Math.sin(phase / 2);
             swayY = 6 * Math.abs(Math.sin(phase / 2));
         }
@@ -1662,7 +1723,7 @@
             drawMapGuy(mapX, mapY, { left: color, top: [color, color], right: color });
         });
 
-        const { x, y } = currentMaze.guy;
+        const { x, y } = getGuyPosition(currentMaze.guy, nowMs);
         const guyLeft = (x - 0.5) * MAP_CELL_W;
         const guyTop = (y - 0.5) * MAP_CELL_H;
         drawMapGuy(guyLeft, guyTop, MAP_GUY_COLORS);
