@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>Pman</title>
     <style>
         html, body {
@@ -9,6 +10,11 @@
             height: 100%;
             overflow: hidden;
             background: #000;
+            /* Swipes steer the guy, so they must not scroll, zoom or select */
+            touch-action: none;
+            overscroll-behavior: none;
+            user-select: none;
+            -webkit-user-select: none;
         }
 
         canvas {
@@ -72,6 +78,31 @@
     // points another. Turns taken on the move don't hold him up.
     const GUY_TURN_WALK_SHARE = 0.5;
     const TURN_KEYS = { ArrowLeft: -1, ArrowRight: 1 };
+
+    // A touch that moves less than this is a tap; more is a swipe
+    const SWIPE_MIN_DISTANCE_PX = 30;
+
+    // Standard game controller button numbers, and how far the left stick
+    // must be pushed to count as a D-pad press
+    const GAMEPAD_BUTTON = {
+        fire: 0,
+        stepLeft: 4,
+        stepRight: 5,
+        fireTrigger: 7,
+        start: 9,
+        up: 12,
+        down: 13,
+        left: 14,
+        right: 15,
+    };
+    const GAMEPAD_STICK_THRESHOLD = 0.5;
+
+    // The controls hint for each way of playing
+    const CONTROLS_HINTS = {
+        keyboard: "Up/Down or W/S: walk   Left/Right: turn   A/D: step sideways   Space: blow bubbles",
+        gamepad: "D-pad up/down: walk   D-pad left/right: turn   LB/RB: step sideways   A: blow bubbles",
+        touch: "Swipe up: walk   Swipe down: stop or step back   Swipe left/right: turn   Tap: blow bubbles",
+    };
 
     // Keys held to walk: forward/back and sideways step
     const MOVE_KEYS = {
@@ -357,6 +388,22 @@
     // Movement keys currently held
     let heldKeys = new Set();
 
+    // Phone swipes: where the current touch began; whether a swipe up has
+    // him walking on his own; and whether a swipe down asked for one step
+    // back
+    let touchStart = null;
+    let isAutoWalking = false;
+    let isBackStepWaiting = false;
+
+    // Game controller: walking from its D-pad and shoulder buttons, and
+    // which buttons were down last time it was read, to spot new presses
+    let gamepadControls = { forward: 0, strafe: 0 };
+    let previousGamepadButtons = {};
+
+    // "keyboard", "touch" or "gamepad": whichever was used last, so the
+    // controls hint matches what the player is holding
+    let lastInputKind = "keyboard";
+
     let lastShotMs = -Infinity;
 
     // The game waits on a start screen until the player first clicks or
@@ -393,8 +440,8 @@
         // guy's clock checks every few milliseconds; see stepGuy.
         if (event.key in TURN_KEYS) {
             event.preventDefault();
-            if (!event.repeat && !isDead) {
-                maze = { ...maze, guy: { ...maze.guy, queuedTurn: TURN_KEYS[event.key] } };
+            if (!event.repeat) {
+                queueTurn(TURN_KEYS[event.key]);
             }
             return;
         }
@@ -409,6 +456,11 @@
         shoot(performance.now());
     });
 
+    // Any key on the keyboard switches the controls hint to keyboard keys
+    window.addEventListener("keydown", () => {
+        lastInputKind = "keyboard";
+    }, { capture: true });
+
     window.addEventListener("keyup", (event) => {
         heldKeys = new Set([...heldKeys].filter((key) => key !== event.key));
     });
@@ -419,12 +471,146 @@
     });
 
     // The first click or key press leaves the start screen. The level is
-    // rebuilt then, so the enemies' clock starts from that moment.
-    window.addEventListener("pointerdown", () => {
+    // rebuilt then, so the enemies' clock starts from that moment. Touches
+    // are handled with the swipe controls below instead.
+    window.addEventListener("pointerdown", (event) => {
+        if (event.pointerType === "touch") {
+            return;
+        }
         window.focus();
         beginPlaying();
     });
     window.addEventListener("keydown", beginPlaying, { capture: true });
+
+    // ---- Phone: swipes and taps ----
+    // Swipe up to start walking (he keeps going on his own), swipe left or
+    // right to make a quarter turn, swipe down to stop or, when already
+    // stopped, step back a square. A tap blows a bubble, and starts or
+    // restarts the game.
+    window.addEventListener("touchstart", (event) => {
+        event.preventDefault();
+        const touch = event.changedTouches[0];
+        touchStart = { x: touch.clientX, y: touch.clientY, ms: performance.now() };
+    }, { passive: false });
+
+    window.addEventListener("touchmove", (event) => {
+        event.preventDefault();
+    }, { passive: false });
+
+    window.addEventListener("touchend", (event) => {
+        event.preventDefault();
+        if (touchStart === null) {
+            return;
+        }
+        const touch = event.changedTouches[0];
+        const dx = touch.clientX - touchStart.x;
+        const dy = touch.clientY - touchStart.y;
+        const isTap = Math.hypot(dx, dy) < SWIPE_MIN_DISTANCE_PX;
+        touchStart = null;
+        lastInputKind = "touch";
+
+        if (!hasStarted) {
+            beginPlaying();
+            return;
+        }
+        if (isDead) {
+            if (isTap) {
+                startGame();
+            }
+            return;
+        }
+        if (isTap) {
+            shoot(performance.now());
+            return;
+        }
+
+        if (Math.abs(dx) > Math.abs(dy)) {
+            queueTurn(Math.sign(dx));
+            return;
+        }
+        if (dy < 0) {
+            isAutoWalking = true;
+            return;
+        }
+        if (isAutoWalking) {
+            isAutoWalking = false;
+        } else {
+            isBackStepWaiting = true;
+        }
+    }, { passive: false });
+
+    // ---- Game controller ----
+    // D-pad (or left stick) up and down walk while held, left and right make
+    // a quarter turn per press, LB and RB step sideways, A or the right
+    // trigger blows bubbles while held, and Start (or any button on the
+    // start screen) starts the game or restarts it after dying. Read every
+    // few milliseconds, since controllers don't send key events.
+    setInterval(pollGamepad, GUY_UPDATE_INTERVAL_MS);
+
+    function pollGamepad() {
+        const pads = [...(navigator.getGamepads?.() ?? [])].filter(Boolean);
+        if (pads.length === 0) {
+            gamepadControls = { forward: 0, strafe: 0 };
+            return;
+        }
+        const pad = pads[0];
+        const isPressed = (index) => Boolean(pad.buttons[index]?.pressed);
+        const stickX = pad.axes[0] ?? 0;
+        const stickY = pad.axes[1] ?? 0;
+        const buttons = {
+            up: isPressed(GAMEPAD_BUTTON.up) || stickY < -GAMEPAD_STICK_THRESHOLD,
+            down: isPressed(GAMEPAD_BUTTON.down) || stickY > GAMEPAD_STICK_THRESHOLD,
+            left: isPressed(GAMEPAD_BUTTON.left) || stickX < -GAMEPAD_STICK_THRESHOLD,
+            right: isPressed(GAMEPAD_BUTTON.right) || stickX > GAMEPAD_STICK_THRESHOLD,
+            stepLeft: isPressed(GAMEPAD_BUTTON.stepLeft),
+            stepRight: isPressed(GAMEPAD_BUTTON.stepRight),
+            fire: isPressed(GAMEPAD_BUTTON.fire) || isPressed(GAMEPAD_BUTTON.fireTrigger),
+            start: isPressed(GAMEPAD_BUTTON.start),
+        };
+        const wasDown = previousGamepadButtons;
+        const isNewPress = (name) => buttons[name] && !wasDown[name];
+        previousGamepadButtons = buttons;
+
+        if (Object.values(buttons).some(Boolean)) {
+            lastInputKind = "gamepad";
+        }
+        if (!hasStarted) {
+            if (Object.keys(buttons).some(isNewPress)) {
+                beginPlaying();
+            }
+            return;
+        }
+        if (isDead) {
+            if (isNewPress("start") || isNewPress("fire")) {
+                startGame();
+            }
+            return;
+        }
+
+        if (isNewPress("left")) {
+            queueTurn(-1);
+        }
+        if (isNewPress("right")) {
+            queueTurn(1);
+        }
+        if (buttons.fire) {
+            shoot(performance.now());
+        }
+        gamepadControls = {
+            forward: Number(buttons.up) - Number(buttons.down),
+            strafe: Number(buttons.stepRight) - Number(buttons.stepLeft),
+        };
+    }
+
+    // Asks for a quarter turn to the right (1) or left (-1). The turn waits
+    // until the guy is in the middle of a square, which his clock checks
+    // every few milliseconds; see stepGuy.
+    function queueTurn(direction) {
+        if (isDead || !hasStarted) {
+            return;
+        }
+        maze = { ...maze, guy: { ...maze.guy, queuedTurn: direction } };
+    }
 
     function beginPlaying() {
         if (hasStarted) {
@@ -446,6 +632,8 @@
     function startLevel() {
         isDead = false;
         maze = createMaze();
+        isAutoWalking = false;
+        isBackStepWaiting = false;
 
         enemyTickCount = 0;
         clearInterval(enemyTimerId);
@@ -545,6 +733,8 @@
             }
 
             current = { ...current, guy: moveGuyOnFromSquare(current.walls, current.guy, nowMs) };
+            // A swipe-down step back is tried once, then forgotten
+            isBackStepWaiting = false;
         }
 
         const collision = resolveCollisions(current, nowMs);
@@ -673,7 +863,19 @@
                 controls[control] = clamp(controls[control] + amount, -1, 1);
             }
         }
-        return controls;
+        // A phone swipe up keeps him walking; a swipe down while stopped
+        // asks for one step back
+        let touchForward = 0;
+        if (isAutoWalking) {
+            touchForward = 1;
+        }
+        if (isBackStepWaiting) {
+            touchForward = -1;
+        }
+        return {
+            forward: clamp(controls.forward + gamepadControls.forward + touchForward, -1, 1),
+            strafe: clamp(controls.strafe + gamepadControls.strafe, -1, 1),
+        };
     }
 
     // The guy a quarter turn to the right (direction 1) or left (-1), with
@@ -2464,8 +2666,7 @@
         ctx.font = "bold 20px monospace";
         ctx.fillText(parts.join("    "), 14, VIEW_H + 24);
         ctx.font = "13px monospace";
-        ctx.fillText("Up/Down or W/S: walk    Left/Right: quarter turn    A/D: step sideways    Space: blow bubbles",
-            14, VIEW_H + 45);
+        ctx.fillText(CONTROLS_HINTS[lastInputKind], 14, VIEW_H + 45);
     }
 
     // Shown until the player first clicks or presses a key: the game's name,
@@ -2486,18 +2687,20 @@
         ctx.fillStyle = "#ffffff";
         ctx.font = "bold 26px sans-serif";
         ctx.lineWidth = 5;
-        ctx.strokeText("Click to play", VIEW_W / 2, VIEW_H / 2 + 5);
-        ctx.fillText("Click to play", VIEW_W / 2, VIEW_H / 2 + 5);
+        ctx.strokeText("Click, tap or press a button to play", VIEW_W / 2, VIEW_H / 2 + 5);
+        ctx.fillText("Click, tap or press a button to play", VIEW_W / 2, VIEW_H / 2 + 5);
 
-        ctx.font = "16px sans-serif";
+        ctx.font = "15px sans-serif";
         const lines = [
             "Eat every dot. Rainbow pellets make the enemies safe to hit.",
-            "Up/Down walk, Left/Right turn, A/D step sideways, Space blows bubbles",
+            `Keyboard: ${CONTROLS_HINTS.keyboard}`,
+            `Controller: ${CONTROLS_HINTS.gamepad}`,
+            `Phone: ${CONTROLS_HINTS.touch}`,
         ];
         lines.forEach((line, i) => {
             ctx.lineWidth = 4;
-            ctx.strokeText(line, VIEW_W / 2, VIEW_H / 2 + 50 + i * 24);
-            ctx.fillText(line, VIEW_W / 2, VIEW_H / 2 + 50 + i * 24);
+            ctx.strokeText(line, VIEW_W / 2, VIEW_H / 2 + 46 + i * 22);
+            ctx.fillText(line, VIEW_W / 2, VIEW_H / 2 + 46 + i * 22);
         });
     }
 
