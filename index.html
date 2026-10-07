@@ -359,6 +359,12 @@
 
     let lastShotMs = -Infinity;
 
+    // The game waits on a start screen until the player first clicks or
+    // presses a key. When the game is shown inside another page, the
+    // keyboard only reaches it after a click, so this keeps the enemies
+    // from moving before the player can.
+    let hasStarted = false;
+
     // The enemy clock ticks RETURNING_ENEMY_SPEEDUP times per normal step;
     // returning enemies move every tick, the rest only on full steps
     let enemyTimerId = null;
@@ -411,6 +417,23 @@
     window.addEventListener("blur", () => {
         heldKeys = new Set();
     });
+
+    // The first click or key press leaves the start screen. The level is
+    // rebuilt then, so the enemies' clock starts from that moment.
+    window.addEventListener("pointerdown", () => {
+        window.focus();
+        beginPlaying();
+    });
+    window.addEventListener("keydown", beginPlaying, { capture: true });
+
+    function beginPlaying() {
+        if (hasStarted) {
+            return;
+        }
+        hasStarted = true;
+        heldKeys = new Set();
+        startGame();
+    }
 
     function startGame() {
         level = 1;
@@ -493,7 +516,7 @@
     // level.
     function stepGuy() {
         const nowMs = performance.now();
-        if (isDead) {
+        if (isDead || !hasStarted) {
             return;
         }
 
@@ -707,7 +730,7 @@
     }
 
     function stepEnemies() {
-        if (isDead) {
+        if (isDead || !hasStarted) {
             return;
         }
         enemyTickCount++;
@@ -1465,6 +1488,9 @@
 
         if (isDead) {
             drawDeathMessage(nowMs);
+        }
+        if (!hasStarted) {
+            drawStartScreen();
         }
 
         ctx.restore();
@@ -2440,6 +2466,39 @@
         ctx.font = "13px monospace";
         ctx.fillText("Up/Down or W/S: walk    Left/Right: quarter turn    A/D: step sideways    Space: blow bubbles",
             14, VIEW_H + 45);
+    }
+
+    // Shown until the player first clicks or presses a key: the game's name,
+    // how to start, and the controls, over a dimmed view of the maze
+    function drawStartScreen() {
+        ctx.fillStyle = "rgba(5, 8, 20, 0.72)";
+        ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+
+        ctx.textAlign = "center";
+        ctx.lineJoin = "round";
+        ctx.strokeStyle = "rgba(0, 0, 0, 0.8)";
+        ctx.fillStyle = DOT_COLOR;
+        ctx.font = "bold 64px sans-serif";
+        ctx.lineWidth = 8;
+        ctx.strokeText("PMAN", VIEW_W / 2, VIEW_H / 2 - 50);
+        ctx.fillText("PMAN", VIEW_W / 2, VIEW_H / 2 - 50);
+
+        ctx.fillStyle = "#ffffff";
+        ctx.font = "bold 26px sans-serif";
+        ctx.lineWidth = 5;
+        ctx.strokeText("Click to play", VIEW_W / 2, VIEW_H / 2 + 5);
+        ctx.fillText("Click to play", VIEW_W / 2, VIEW_H / 2 + 5);
+
+        ctx.font = "16px sans-serif";
+        const lines = [
+            "Eat every dot. Rainbow pellets make the enemies safe to hit.",
+            "Up/Down walk, Left/Right turn, A/D step sideways, Space blows bubbles",
+        ];
+        lines.forEach((line, i) => {
+            ctx.lineWidth = 4;
+            ctx.strokeText(line, VIEW_W / 2, VIEW_H / 2 + 50 + i * 24);
+            ctx.fillText(line, VIEW_W / 2, VIEW_H / 2 + 50 + i * 24);
+        });
     }
 
     // The view floods with the colour of the enemy that caught the guy,
