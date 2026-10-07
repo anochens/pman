@@ -255,7 +255,12 @@
 
     // Enemies are drawn as their blocky 4x3 shape, in a canvas this many
     // pixels per block, then scaled into the view
-    const ENEMY_SPRITE_BLOCK_PX = 10;
+    const ENEMY_SPRITE_BLOCK_PX = 40;
+
+    // The bullseye on a frightened enemy: ring sizes in blocks from the
+    // outside in, coloured in turn
+    const TARGET_RING_RADII_BLOCKS = [1.05, 0.78, 0.5, 0.24];
+    const TARGET_RING_COLORS = ["#e01e1e", "#ffffff"];
 
     // Each enemy is one solid colour, in this order
     const ENEMY_BODY_COLORS = ["#ff2020", "#ff8cdc", "#00e5ff"];
@@ -1797,10 +1802,11 @@
     // An enemy standing on the floor, drawn one screen column at a time so
     // a wall in front of part of it hides just that part
     function drawEnemy(currentMaze, index, view, camera, wallDepths, nowMs) {
-        let sprite = getEnemySprite(getEnemyColor(currentMaze, index, nowMs));
+        const hasTarget = isEnemyFrightened(currentMaze, index, nowMs);
+        let sprite = getEnemySprite(getEnemyColor(currentMaze, index, nowMs), hasTarget);
         let alpha = clamp(1 - view.depth / FOG_DISTANCE_SQUARES, MIN_LIGHT, 1) * 0.5 + 0.5;
         if (currentMaze.returningEnemyCorners.has(index)) {
-            sprite = getEnemySprite(RETURNING_ENEMY_COLOR);
+            sprite = getEnemySprite(RETURNING_ENEMY_COLOR, false);
             alpha = RETURNING_ENEMY_ALPHA;
         }
 
@@ -1853,8 +1859,11 @@
     // The enemy's blocky shape (a bar across the top and a leg down each
     // side) in one colour, drawn into its own small canvas the first time
     // it is needed
-    function getEnemySprite(color) {
-        if (!enemySpriteCache.has(color)) {
+    // hasTarget paints a red-and-white bullseye on the middle of its body,
+    // shown on frightened enemies to say they are safe to hit
+    function getEnemySprite(color, hasTarget) {
+        const cacheKey = `${color}|${hasTarget}`;
+        if (!enemySpriteCache.has(cacheKey)) {
             const block = ENEMY_SPRITE_BLOCK_PX;
             const sprite = document.createElement("canvas");
             sprite.width = 4 * block;
@@ -1864,9 +1873,21 @@
             spriteCtx.fillRect(0, 0, 4 * block, block);
             spriteCtx.fillRect(0, 0, block, 3 * block);
             spriteCtx.fillRect(3 * block, 0, block, 3 * block);
-            enemySpriteCache.set(color, sprite);
+
+            if (hasTarget) {
+                // Rings from the outside in, alternating red and white
+                const centerX = 2 * block;
+                const centerY = 1.1 * block;
+                TARGET_RING_RADII_BLOCKS.forEach((radius, i) => {
+                    spriteCtx.fillStyle = TARGET_RING_COLORS[i % TARGET_RING_COLORS.length];
+                    spriteCtx.beginPath();
+                    spriteCtx.arc(centerX, centerY, radius * block, 0, Math.PI * 2);
+                    spriteCtx.fill();
+                });
+            }
+            enemySpriteCache.set(cacheKey, sprite);
         }
-        return enemySpriteCache.get(color);
+        return enemySpriteCache.get(cacheKey);
     }
 
     // ---- The bubble blaster, a small 3D model ----
