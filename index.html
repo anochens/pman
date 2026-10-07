@@ -8,6 +8,7 @@
             margin: 0;
             height: 100%;
             overflow: hidden;
+            background: #000;
         }
 
         canvas {
@@ -21,155 +22,20 @@
 <canvas id="myCanvas"></canvas>
 
 <script>
-    const PIXEL_RES = 10;
+    // ---- The world ----
 
-    // Size of the guy in grid squares
-    const GUY_WIDTH_SQUARES = 4;
-    const GUY_HEIGHT_SQUARES = 3;
-
-    // Size of one guy-unit square in pixels
-    const CELL_PIXEL_W = GUY_WIDTH_SQUARES * PIXEL_RES;
-    const CELL_PIXEL_H = GUY_HEIGHT_SQUARES * PIXEL_RES;
-
-    // Each maze the guy lives in (in guy-sized units). Mazes are built on
-    // a lattice, so both sizes must be odd.
+    // The maze, in squares. It is built on a lattice, so both sizes must
+    // be odd. Walls fill whole squares.
     const WORLD_COLS = 15;
     const WORLD_ROWS = 19;
-    const MAZE_PIXEL_W = WORLD_COLS * CELL_PIXEL_W;
-    const MAZE_PIXEL_H = WORLD_ROWS * CELL_PIXEL_H;
-
-    // Mazes sit side by side, each with its own guy, walls, dots and
-    // enemies. Every key press moves the guy in all of them. The level is
-    // cleared when every maze is, and he dies if he is caught in any.
-    const MAZE_COUNT = 1;
-    const MAZE_GAP_PX = 24;
 
     // On this row the left and right border walls have a gap. Walking off
     // one edge brings you in at the other. Must be an odd row.
     const TUNNEL_ROW = Math.floor(WORLD_ROWS / 2);
 
-    const canvas = document.getElementById("myCanvas");
-    const ctx = canvas.getContext("2d");
-
-    // Guy starts at bottom middle, aligned to guy-unit squares
-    const GUY_START_X = Math.floor(WORLD_COLS / 2) * GUY_WIDTH_SQUARES;
-    const GUY_START_Y = (WORLD_ROWS - 2) * GUY_HEIGHT_SQUARES;
-
-    // On level 1 enemies step this often. Each later level they move this
-    // many times faster than the level before.
-    const LEVEL_1_ENEMY_STEP_INTERVAL_MS = 1000;
-    const ENEMY_SPEEDUP_PER_LEVEL = 1.05;
-
-    const ENEMIES_PER_MAZE = 3;
-
-    // Enemies start at least this many squares from the guy, counted
-    // straight across the grid ignoring walls
-    const ENEMY_MIN_START_GRID_DISTANCE = WORLD_ROWS / 2;
-
-    const BACKGROUND_COLOR = "#000";
-
-    // "inside" fills the space under the body so dots don't show through
-    const GUY_COLORS = { left: "red", top: ["blue", "green"], right: "orange", inside: BACKGROUND_COLOR };
-
-    // Each enemy is one solid colour, in this order across both mazes
-    const ENEMY_BODY_COLORS = ["#ff2020", "#ff8cdc", "#00e5ff", "#b46bff"];
-    const ENEMY_COLORS = ENEMY_BODY_COLORS.map((color) => (
-        { left: color, top: [color, color], right: color, inside: BACKGROUND_COLOR }
-    ));
-
-    // Frightened enemies are all this grey
-    const FRIGHTENED_ENEMY_COLOR = "#a0a0a0";
-    const FRIGHTENED_ENEMY_COLORS = {
-        left: FRIGHTENED_ENEMY_COLOR,
-        top: [FRIGHTENED_ENEMY_COLOR, FRIGHTENED_ENEMY_COLOR],
-        right: FRIGHTENED_ENEMY_COLOR,
-        inside: BACKGROUND_COLOR,
-    };
-    // ...and flash this colour as the power runs out
-    const FRIGHTENED_FLASH_COLOR = "#ffffff";
-    const FRIGHTENED_FLASH_COLORS = {
-        left: FRIGHTENED_FLASH_COLOR,
-        top: [FRIGHTENED_FLASH_COLOR, FRIGHTENED_FLASH_COLOR],
-        right: FRIGHTENED_FLASH_COLOR,
-        inside: BACKGROUND_COLOR,
-    };
-
-    // The guy slides between squares instead of jumping. Enemies glide at a
-    // steady speed, each slide lasting their whole step interval.
-    const GUY_SLIDE_MS = 120;
-
-    // The player's guy is drawn smoothly, at full screen resolution, as his
-    // coloured body bar with two human legs under it: thigh, knee, shin and
-    // foot, seen from the side. Sizes are in screen pixels within his box.
-    const GUY_BODY_HEIGHT_PX = 10;
-    const GUY_HIP_OFFSET_PX = 5;
-    const GUY_THIGH_PX = 10;
-    const GUY_SHIN_PX = 10;
-    const GUY_FOOT_PX = 6;
-    const GUY_LEG_WIDTH_PX = 4;
-
-    // Walking: each thigh swings forward and back from the hip, the legs
-    // half a cycle apart so they pass each other. The knee bends while a
-    // leg swings forward and stays almost straight while it carries his
-    // weight, and his body rises a little as the legs pass. One full cycle
-    // is two steps. He counts as walking until GUY_WALK_LINGER_MS after his
-    // last step, which covers the gap between held-key repeats; then he
-    // stands still with straight legs.
-    const GUY_WALK_CYCLE_MS = 520;
-    const GUY_HIP_SWING_DEG = 28;
-    const GUY_KNEE_BEND_DEG = 65;
-    const GUY_STANCE_KNEE_BEND_DEG = 6;
-    const GUY_BODY_BOB_PX = 2;
-    const GUY_WALK_LINGER_MS = 220;
-
-    const DOT_COLOR = "#ffd700";
-    const DOT_RADIUS_PX = 3;
-
-    // Dots are laid in runs that cover about this share of open squares.
-    // Every group of touching dots has at least DOT_RUN_MIN_LENGTH dots.
-    const DOT_SHARE = 0.6;
-    const DOT_RUN_MIN_LENGTH = 5;
-    const DOT_RUN_MAX_LENGTH = 10;
-    const DOT_RUN_STRAIGHT_CHANCE = 0.7;
-
-    // Power pellets: big dots, one in each quarter of a maze, that let the
-    // guy eat that maze's enemies for a while. Frightened enemies turn grey
-    // and wander at random, flashing white near the end. An eaten enemy
-    // walks at double speed to the corner farthest from the guy, harmless
-    // and not edible, then goes back to normal.
-    const POWER_PELLET_RADIUS_PX = 7;
-    const POWER_PELLET_POINTS = 50;
-    const FRIGHTENED_DURATION_MS = 10000;
-    const FRIGHTENED_FLASH_FINAL_MS = 3000;
-    const FRIGHTENED_FLASH_PERIOD_MS = 250;
-    const EATEN_ENEMY_POINTS = 200;
-    const RETURNING_ENEMY_SPEEDUP = 2;
-
-    // An enemy walking back is drawn as just a faint grey outline
-    const RETURNING_ENEMY_OUTLINE_COLOR = "rgba(160, 160, 160, 0.55)";
-    const RETURNING_ENEMY_OUTLINE_WIDTH_PX = 2;
-    const HUD_TEXT_COLOR = "#000";
-
-    const POINTS_PER_DOT = 10;
-
-    // The guy shoots with Space. A bullet flies straight up, down, left or
-    // right: at the nearest enemy lined up with him in clear sight, or
-    // otherwise in the direction that points most toward the nearest enemy.
-    // It stops at the first wall. An enemy it hits scores points and walks
-    // back to the far corner, the same as an eaten one.
-    const BULLET_SPEED_PX_PER_MS = 0.5;
-    const BULLET_RADIUS_PX = 4;
-    const BULLET_COLOR = "#ffffff";
-    const BULLET_STEP_PX = 4;
-    const BULLET_UPDATE_INTERVAL_MS = 16;
-    const SHOT_COOLDOWN_MS = 300;
-    const SHOT_ENEMY_POINTS = 200;
-
-    // Wall look: a stone bar half a square thick with a bevelled edge
-    const WALL_BEVEL_PX = 3;
-    const WALL_FACE_COLOR = "#5a5a5a";
-    const WALL_LIGHT_COLOR = "#8c8c8c";
-    const WALL_DARK_COLOR = "#262626";
+    // The guy starts in the bottom middle square, facing down the longest
+    // open corridor from there, so walking forward always gets him going
+    const GUY_START_SQUARE = [Math.floor(WORLD_COLS / 2), WORLD_ROWS - 2];
 
     const STEP_DIRECTIONS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
 
@@ -185,29 +51,210 @@
     // they are thrown away and rebuilt.
     const MAZE_GENERATION_MAX_ATTEMPTS = 50;
 
+    // ---- The guy (you) ----
+
+    // You see the maze through the guy's eyes. Up/W walks forward, Down/S
+    // back, A/D step sideways. Speeds are per millisecond; the guy's clock
+    // runs every GUY_UPDATE_INTERVAL_MS.
+    const GUY_WALK_SPEED_SQUARES_PER_MS = 0.0032;
+    const GUY_RADIUS_SQUARES = 0.22;
+    const GUY_UPDATE_INTERVAL_MS = 16;
+
+    // He only ever faces along the grid. Each press of Left/Right turns him
+    // exactly 90 degrees, the view gliding round over GUY_TURN_MS.
+    const GUY_TURN_MS = 600;
+
+    // Walking waits until a turn's swing is this far through, so he never
+    // walks one way while the view still points another
+    const GUY_TURN_WALK_SHARE = 0.5;
+    const TURN_KEYS = { ArrowLeft: -1, ArrowRight: 1 };
+
+    // While he walks, he is drawn toward the middle of the corridor at this
+    // speed, so he passes straight through each square and lines up with
+    // side passages
+    const GUY_CENTERING_SPEED_SQUARES_PER_MS = 0.004;
+
+    // Longest gap the guy's clock will catch up on in one go, so a stall
+    // (a background tab, say) can't fling him through a wall
+    const GUY_MAX_UPDATE_GAP_MS = 50;
+
+    // Keys held to walk: forward/back and sideways step
+    const MOVE_KEYS = {
+        ArrowUp: { forward: 1 }, w: { forward: 1 }, W: { forward: 1 },
+        ArrowDown: { forward: -1 }, s: { forward: -1 }, S: { forward: -1 },
+        a: { strafe: -1 }, A: { strafe: -1 }, d: { strafe: 1 }, D: { strafe: 1 },
+    };
+
+    // ---- Enemies ----
+
+    // On level 1 enemies step one square this often. Each later level they
+    // move this many times faster than the level before.
+    const LEVEL_1_ENEMY_STEP_INTERVAL_MS = 1000;
+    const ENEMY_SPEEDUP_PER_LEVEL = 1.05;
+    const ENEMY_COUNT = 3;
+
+    // Enemies start at least this many squares from the guy, counted
+    // straight across the grid ignoring walls
+    const ENEMY_MIN_START_GRID_DISTANCE = WORLD_ROWS / 2;
+
+    // An enemy catches the guy (or, frightened, gets eaten) once its middle
+    // is this close to his
+    const CATCH_DISTANCE_SQUARES = 0.55;
+
+    // Power pellets: big dots, one in each quarter of the maze, that let the
+    // guy eat enemies for a while. Frightened enemies turn grey and wander
+    // at random, flashing white near the end. An eaten or shot enemy fades
+    // to a ghost and walks at double speed to the corner farthest from the
+    // guy, harmless and not edible, then goes back to normal.
+    const POWER_PELLET_POINTS = 50;
+    const FRIGHTENED_DURATION_MS = 10000;
+    const FRIGHTENED_FLASH_FINAL_MS = 3000;
+    const FRIGHTENED_FLASH_PERIOD_MS = 250;
+    const EATEN_ENEMY_POINTS = 200;
+    const RETURNING_ENEMY_SPEEDUP = 2;
+
+    // ---- Dots, score ----
+
+    // Dots are laid in runs that cover about this share of open squares.
+    // Every group of touching dots has at least DOT_RUN_MIN_LENGTH dots.
+    const DOT_SHARE = 0.6;
+    const DOT_RUN_MIN_LENGTH = 5;
+    const DOT_RUN_MAX_LENGTH = 10;
+    const DOT_RUN_STRAIGHT_CHANCE = 0.7;
+    const POINTS_PER_DOT = 10;
+
+    // ---- Shooting ----
+
+    // Space fires a bullet straight ahead, the way the guy is looking. It
+    // stops at the first wall. An enemy it hits scores points and walks
+    // back to the far corner, the same as an eaten one.
+    const BULLET_SPEED_SQUARES_PER_MS = 0.012;
+    const BULLET_HIT_RADIUS_SQUARES = 0.4;
+    const BULLET_UPDATE_INTERVAL_MS = 16;
+    const SHOT_COOLDOWN_MS = 300;
+    const SHOT_ENEMY_POINTS = 200;
+
+    // ---- First-person view ----
+
+    // The 3D view is VIEW_W by VIEW_H pixels, with the status bar under it.
+    // A wall square looks VIEW_H tall from one square away. Things fade into
+    // darkness with distance and are gone by FOG_DISTANCE_SQUARES.
+    const VIEW_W = 800;
+    const VIEW_H = 450;
+    const FIELD_OF_VIEW_RADIANS = (66 * Math.PI) / 180;
+    const FOG_DISTANCE_SQUARES = 11;
+    const MIN_LIGHT = 0.12;
+    const MAX_RAY_STEPS = 80;
+
+    // Walls are stone bricks: BRICK_ROWS rows of bricks per wall, each brick
+    // 1 / BRICKS_PER_SQUARE of a square wide, with dark mortar between.
+    // Faces running north-south are drawn a little darker, as if lit from
+    // one side.
+    const WALL_BASE_RGB = [128, 112, 96];
+    const MORTAR_RGB = [40, 34, 30];
+    const BRICK_ROWS = 5;
+    const BRICKS_PER_SQUARE = 3;
+    const MORTAR_SHARE = 0.08;
+    const BRICK_SHADE_VARIATION = 0.18;
+    const SIDE_WALL_SHADE = 0.72;
+
+    const CEILING_TOP_COLOR = "#05050a";
+    const CEILING_HORIZON_COLOR = "#1b1b26";
+    const FLOOR_HORIZON_COLOR = "#1d1712";
+    const FLOOR_NEAR_COLOR = "#4a3a2c";
+
+    // Heights of things above the floor, as a share of wall height
+    const DOT_HEIGHT_SHARE = 0.18;
+    const DOT_RADIUS_SHARE = 0.035;
+    const POWER_PELLET_RADIUS_SHARE = 0.09;
+    const BULLET_HEIGHT_SHARE = 0.42;
+    const BULLET_RADIUS_SHARE = 0.04;
+    const ENEMY_HEIGHT_SHARE = 0.62;
+
+    // The guy's view bobs as he walks, two bobs per square
+    const HEAD_BOB_PX = 6;
+    const HEAD_BOB_PER_SQUARE = 2;
+    const WALK_BOB_LINGER_MS = 150;
+
+    // The gun at the bottom of the screen, and its flash when it fires
+    const GUN_FLASH_MS = 80;
+
+    const DOT_COLOR = "#ffd700";
+    const BULLET_COLOR = "#fffbe0";
+
+    // Enemies are drawn as their blocky 4x3 shape, in a canvas this many
+    // pixels per block, then scaled into the view
+    const ENEMY_SPRITE_BLOCK_PX = 10;
+
+    // Each enemy is one solid colour, in this order
+    const ENEMY_BODY_COLORS = ["#ff2020", "#ff8cdc", "#00e5ff"];
+    const FRIGHTENED_ENEMY_COLOR = "#a0a0a0";
+    const FRIGHTENED_FLASH_COLOR = "#ffffff";
+
+    // An enemy walking back is a faint see-through ghost
+    const RETURNING_ENEMY_COLOR = "#c8c8c8";
+    const RETURNING_ENEMY_ALPHA = 0.3;
+
+    // Automap in the top-right corner of the view: the original flat 2D
+    // game, drawn at its own size (each square MAP_CELL_W by MAP_CELL_H
+    // pixels, characters in blocks of MAP_BLOCK_PX) and shrunk by
+    // MINIMAP_SCALE. Walls are stone bars half a square thick with a
+    // bevelled edge, characters are their blocky shapes, and a small white
+    // wedge in front of the guy shows which way he faces.
+    const MAP_BLOCK_PX = 10;
+    const MAP_CELL_W = 4 * MAP_BLOCK_PX;
+    const MAP_CELL_H = 3 * MAP_BLOCK_PX;
+    const MINIMAP_SCALE = 0.3;
+    const MINIMAP_MARGIN_PX = 10;
+    const MAP_WALL_BEVEL_PX = 3;
+    const MAP_WALL_FACE_COLOR = "#5a5a5a";
+    const MAP_WALL_LIGHT_COLOR = "#8c8c8c";
+    const MAP_WALL_DARK_COLOR = "#262626";
+    const MAP_DOT_RADIUS_PX = 3;
+    const MAP_PELLET_RADIUS_PX = 7;
+    const MAP_GUY_COLORS = { left: "red", top: ["blue", "green"], right: "orange" };
+    const MAP_RETURNING_ENEMY_OUTLINE_COLOR = "rgba(160, 160, 160, 0.55)";
+    const MAP_OUTLINE_WIDTH_PX = 3;
+    const MAP_FACING_WEDGE_COLOR = "#ffffff";
+
+    const HUD_HEIGHT_PX = 56;
+    const HUD_BACKGROUND_COLOR = "#1a1410";
+    const HUD_TEXT_COLOR = "#e8d9b0";
+
+    // ---- Game state ----
+
+    const canvas = document.getElementById("myCanvas");
+    const ctx = canvas.getContext("2d");
+
     let level = 1;
 
-    // Score is shared by both mazes, carries over between levels and
-    // resets on a new game
+    // Score carries over between levels and resets on a new game
     let score = 0;
     let isDead = false;
 
-    // One object per maze, holding:
-    //   originPx            left edge of the maze on the canvas
+    // The maze for this level, holding:
     //   walls, dots,
-    //   powerPellets        Sets of "x,y" keys in guy-unit squares
-    //   guyX, guyY          guy position in pixel-grid squares
-    //   guySlide            where his slide started, when, and when his
-    //                       current run of steps began (for his walk cycle)
-    //   guyFacing           1 if he last moved right, -1 if left
-    //   enemies             [x, y] in guy-unit squares
+    //   powerPellets        Sets of "x,y" keys of squares
+    //   guy                 { x, y, angle, turnFromAngle, turnStartMs }:
+    //                       position in squares; angle is the way he faces,
+    //                       always a multiple of 90 degrees in radians (0 is
+    //                       east, y grows south, kept unwrapped so turns
+    //                       always swing the short way); the view swings
+    //                       from turnFromAngle to angle, starting at turnStartMs
+    //   walkDistance        how far the guy has walked, for his head bob
+    //   lastWalkMs          when he last moved, for his head bob
+    //   enemies             [x, y] squares
     //   enemySlides         per enemy: where its slide started, when, how long
-    //   frightenedUntilMs   when this maze's power runs out
+    //   frightenedUntilMs   when the power runs out
     //   frightenedEnemyIndexes  enemies still frightened and edible
     //   returningEnemyCorners   eaten or shot enemies walking back (index -> [x, y])
-    //   bullets             { x, y, vx, vy, lastMs } in pixels from the maze's
-    //                       top-left, velocity in pixels per ms
-    let mazes = [];
+    //   bullets             { x, y, vx, vy, lastMs } in squares, velocity in
+    //                       squares per ms
+    let maze = null;
+
+    // Movement keys currently held
+    let heldKeys = new Set();
+    let lastGuyUpdateMs = performance.now();
 
     let lastShotMs = -Infinity;
 
@@ -216,7 +263,11 @@
     let enemyTimerId = null;
     let enemyTickCount = 0;
 
+    // Enemy pictures, drawn once per colour and reused every frame
+    const enemySpriteCache = new Map();
+
     startGame();
+    setInterval(stepGuy, GUY_UPDATE_INTERVAL_MS);
     setInterval(stepBullets, BULLET_UPDATE_INTERVAL_MS);
 
     resizeCanvas();
@@ -225,43 +276,37 @@
     window.addEventListener("resize", resizeCanvas);
 
     window.addEventListener("keydown", (event) => {
-        if (isDead) {
-            if (event.key !== " ") {
-                return;
-            }
+        if (event.key in MOVE_KEYS) {
             event.preventDefault();
+            heldKeys = new Set([...heldKeys, event.key]);
+            return;
+        }
+        // One quarter turn per press; holding the key doesn't keep spinning
+        if (event.key in TURN_KEYS) {
+            event.preventDefault();
+            if (!event.repeat && !isDead) {
+                maze = { ...maze, guy: turnGuy(maze.guy, TURN_KEYS[event.key], performance.now()) };
+            }
+            return;
+        }
+        if (event.key !== " ") {
+            return;
+        }
+        event.preventDefault();
+        if (isDead) {
             startGame();
             return;
         }
+        shoot(performance.now());
+    });
 
-        switch (event.key) {
+    window.addEventListener("keyup", (event) => {
+        heldKeys = new Set([...heldKeys].filter((key) => key !== event.key));
+    });
 
-            case " ":
-                shoot(performance.now());
-                break;
-
-            case "ArrowUp":
-                takeTurn(0, -1);
-                break;
-
-            case "ArrowDown":
-                takeTurn(0, 1);
-                break;
-
-            case "ArrowLeft":
-                takeTurn(-1, 0);
-                break;
-
-            case "ArrowRight":
-                takeTurn(1, 0);
-                break;
-
-            default:
-                return;
-        }
-
-        // Stop the arrow keys from scrolling the page
-        event.preventDefault();
+    // Keys released while the window is in the background never report it
+    window.addEventListener("blur", () => {
+        heldKeys = new Set();
     });
 
     function startGame() {
@@ -270,11 +315,11 @@
         startLevel();
     }
 
-    // Builds fresh mazes for the current level and restarts the enemy clock
+    // Builds a fresh maze for the current level and restarts the enemy clock
     // so the enemies' first step is a full interval in
     function startLevel() {
         isDead = false;
-        mazes = Array.from({ length: MAZE_COUNT }, (_, i) => createMaze(i * (MAZE_PIXEL_W + MAZE_GAP_PX)));
+        maze = createMaze();
 
         enemyTickCount = 0;
         clearInterval(enemyTimerId);
@@ -282,23 +327,27 @@
     }
 
     // A new maze for the current level: walls, dots, power pellets, and
-    // the guy and enemies at their start squares with no slide
-    function createMaze(originPx) {
-        const guySquare = [GUY_START_X / GUY_WIDTH_SQUARES, GUY_START_Y / GUY_HEIGHT_SQUARES];
-        const walls = buildValidWalls(guySquare);
-        const dotRuns = placeDotRuns(walls, guySquare);
-        const { dots, powerPellets } = placePowerPellets(walls, dotRuns, guySquare);
-        const enemies = getEnemyStartSquares(walls, guySquare, ENEMIES_PER_MAZE);
+    // the guy and enemies at their start squares
+    function createMaze() {
+        const walls = buildValidWalls(GUY_START_SQUARE);
+        const dotRuns = placeDotRuns(walls, GUY_START_SQUARE);
+        const { dots, powerPellets } = placePowerPellets(walls, dotRuns, GUY_START_SQUARE);
+        const enemies = getEnemyStartSquares(walls, GUY_START_SQUARE, ENEMY_COUNT);
+        const startAngle = getLongestCorridorAngle(walls, GUY_START_SQUARE);
 
         return {
-            originPx,
             walls,
             dots,
             powerPellets,
-            guyX: GUY_START_X,
-            guyY: GUY_START_Y,
-            guySlide: { fromX: GUY_START_X, fromY: GUY_START_Y, startMs: -Infinity, walkStartMs: -Infinity },
-            guyFacing: 1,
+            guy: {
+                x: GUY_START_SQUARE[0] + 0.5,
+                y: GUY_START_SQUARE[1] + 0.5,
+                angle: startAngle,
+                turnFromAngle: startAngle,
+                turnStartMs: -Infinity,
+            },
+            walkDistance: 0,
+            lastWalkMs: -Infinity,
             enemies,
             enemySlides: enemies.map(([x, y]) => ({ fromX: x, fromY: y, startMs: -Infinity, durationMs: 1 })),
             frightenedUntilMs: -Infinity,
@@ -308,35 +357,178 @@
         };
     }
 
-    // Moves the guy in every maze and sorts out any enemy he walks into.
-    // Otherwise he eats the dot or power pellet on his square. Clearing the
-    // last dot and pellet in every maze starts the next level.
-    function takeTurn(dxUnits, dyUnits) {
-        const nowMs = performance.now();
-        let points = 0;
-        let isCaught = false;
-
-        mazes = mazes.map((maze) => {
-            const collision = resolveCollisions(moveGuy(maze, dxUnits, dyUnits, nowMs), nowMs);
-            points += collision.points;
-            if (collision.isCaught) {
-                isCaught = true;
-                return collision.maze;
+    // The facing, as an angle along the grid, that looks down the longest
+    // straight run of open squares from the given square
+    function getLongestCorridorAngle(walls, [squareX, squareY]) {
+        let bestAngle = 0;
+        let bestLength = -1;
+        for (const [dx, dy] of STEP_DIRECTIONS) {
+            let [x, y] = [squareX, squareY];
+            let length = 0;
+            let next = getStepDestination(walls, x, y, dx, dy);
+            while (next !== null && length < WORLD_COLS + WORLD_ROWS) {
+                [x, y] = next;
+                length++;
+                next = getStepDestination(walls, x, y, dx, dy);
             }
-            const meal = eatAtGuy(collision.maze, nowMs);
-            points += meal.points;
-            return meal.maze;
-        });
+            if (length > bestLength) {
+                bestLength = length;
+                bestAngle = Math.atan2(dy, dx);
+            }
+        }
+        return bestAngle;
+    }
 
-        score += points;
-        if (isCaught) {
+    // The guy's clock: walks him for the time since it last ran, then sorts
+    // out any enemy he has run into and eats what is on his
+    // square. Clearing the last dot and pellet starts the next level.
+    function stepGuy() {
+        const nowMs = performance.now();
+        const elapsedMs = Math.min(nowMs - lastGuyUpdateMs, GUY_MAX_UPDATE_GAP_MS);
+        lastGuyUpdateMs = nowMs;
+        if (isDead) {
+            return;
+        }
+
+        const controls = getControls();
+        const walked = walkGuy(maze, controls, elapsedMs, nowMs);
+        const collision = resolveCollisions(walked, nowMs);
+        score += collision.points;
+        if (collision.isCaught) {
+            maze = collision.maze;
             isDead = true;
             return;
         }
-        if (mazes.every((maze) => maze.dots.size === 0 && maze.powerPellets.size === 0)) {
+
+        const meal = eatAtGuy(collision.maze, nowMs);
+        maze = meal.maze;
+        score += meal.points;
+        if (maze.dots.size === 0 && maze.powerPellets.size === 0) {
             level++;
             startLevel();
         }
+    }
+
+    // How the held keys add up: forward (+1) or back (-1), and step right
+    // (+1) or left (-1)
+    function getControls() {
+        const controls = { forward: 0, strafe: 0 };
+        for (const key of heldKeys) {
+            for (const [control, amount] of Object.entries(MOVE_KEYS[key])) {
+                controls[control] = clamp(controls[control] + amount, -1, 1);
+            }
+        }
+        return controls;
+    }
+
+    // The guy a quarter turn to the right (direction 1) or left (-1). The
+    // view swings round from wherever it is right now, so a second press
+    // mid-swing carries on smoothly.
+    function turnGuy(guy, direction, nowMs) {
+        return {
+            ...guy,
+            angle: guy.angle + (direction * Math.PI) / 2,
+            turnFromAngle: getGuyViewAngle(guy, nowMs),
+            turnStartMs: nowMs,
+        };
+    }
+
+    // The way the guy's view points right now: part way through a turn's
+    // swing, which speeds up gently and slows down gently so it never
+    // lurches, or his facing once the swing is done
+    function getGuyViewAngle(guy, nowMs) {
+        const progress = getSlideProgress(guy.turnStartMs, GUY_TURN_MS, nowMs);
+        const eased = progress * progress * (3 - 2 * progress);
+        return guy.turnFromAngle + (guy.angle - guy.turnFromAngle) * eased;
+    }
+
+    // The maze with the guy walked for elapsedMs, along the grid: forward
+    // and back the way he faces, sideways along his right hand. He slides
+    // along walls rather than stopping dead against them, and is drawn to
+    // the middle of the corridor across the way he walks.
+    function walkGuy(currentMaze, { forward, strafe }, elapsedMs, nowMs) {
+        const { guy } = currentMaze;
+        if (getSlideProgress(guy.turnStartMs, GUY_TURN_MS, nowMs) < GUY_TURN_WALK_SHARE) {
+            return currentMaze;
+        }
+
+        // His facing as a whole grid step, e.g. [0, -1] for north
+        const faceX = Math.round(Math.cos(guy.angle));
+        const faceY = Math.round(Math.sin(guy.angle));
+        let moveX = faceX * forward - faceY * strafe;
+        let moveY = faceY * forward + faceX * strafe;
+
+        // Walking and stepping sideways at once is no faster than either
+        const moveLength = Math.hypot(moveX, moveY);
+        if (moveLength > 1) {
+            moveX /= moveLength;
+            moveY /= moveLength;
+        }
+        const stepLength = GUY_WALK_SPEED_SQUARES_PER_MS * elapsedMs;
+        const centeringStep = GUY_CENTERING_SPEED_SQUARES_PER_MS * elapsedMs;
+
+        let startX = guy.x;
+        let startY = guy.y;
+        if (moveX !== 0 && moveY === 0) {
+            startY = moveToward(guy.y, Math.floor(guy.y) + 0.5, centeringStep);
+        }
+        if (moveY !== 0 && moveX === 0) {
+            startX = moveToward(guy.x, Math.floor(guy.x) + 0.5, centeringStep);
+        }
+
+        // Each axis moves separately, so a blocked one doesn't stop the other
+        let x = startX + moveX * stepLength;
+        if (isBlockedForGuy(currentMaze.walls, x, startY)) {
+            x = startX;
+        }
+        let y = startY + moveY * stepLength;
+        if (isBlockedForGuy(currentMaze.walls, x, y)) {
+            y = startY;
+        }
+        x = (x + WORLD_COLS) % WORLD_COLS;
+
+        const walkedSquares = Math.hypot(getWrappedDeltaX(guy.x, x), y - guy.y);
+        let { walkDistance, lastWalkMs } = currentMaze;
+        if (walkedSquares > 0) {
+            walkDistance += walkedSquares;
+            lastWalkMs = nowMs;
+        }
+
+        return { ...currentMaze, guy: { ...guy, x, y }, walkDistance, lastWalkMs };
+    }
+
+    // True if the guy, standing at (x, y), would overlap a wall
+    function isBlockedForGuy(walls, x, y) {
+        const r = GUY_RADIUS_SQUARES;
+        return [[x - r, y - r], [x + r, y - r], [x - r, y + r], [x + r, y + r]]
+            .some(([cornerX, cornerY]) => isWallAt(walls, Math.floor(cornerX), Math.floor(cornerY)));
+    }
+
+    // True if the square is a wall. Above and below the maze counts as wall;
+    // left and right wrap round, as through the tunnel.
+    function isWallAt(walls, squareX, squareY) {
+        if (squareY < 0 || squareY >= WORLD_ROWS) {
+            return true;
+        }
+        const wrappedX = ((squareX % WORLD_COLS) + WORLD_COLS) % WORLD_COLS;
+        return walls.has(wallKey(wrappedX, squareY));
+    }
+
+    // The shortest way from x1 to x2 across the maze, allowing for the
+    // tunnel joining the left and right edges
+    function getWrappedDeltaX(x1, x2) {
+        let delta = x2 - x1;
+        if (delta > WORLD_COLS / 2) {
+            delta -= WORLD_COLS;
+        }
+        if (delta < -WORLD_COLS / 2) {
+            delta += WORLD_COLS;
+        }
+        return delta;
+    }
+
+    function getDistanceSquares(x1, y1, x2, y2) {
+        return Math.hypot(getWrappedDeltaX(x1, x2), y2 - y1);
     }
 
     function stepEnemies() {
@@ -346,185 +538,12 @@
         enemyTickCount++;
         const isFullStep = enemyTickCount % RETURNING_ENEMY_SPEEDUP === 0;
         const nowMs = performance.now();
-        let points = 0;
-        let isCaught = false;
-
-        mazes = mazes.map((maze) => {
-            const collision = resolveCollisions(moveEnemies(maze, isFullStep, nowMs), nowMs);
-            points += collision.points;
-            isCaught = isCaught || collision.isCaught;
-            return collision.maze;
-        });
-
-        score += points;
-        if (isCaught) {
+        const collision = resolveCollisions(moveEnemies(maze, isFullStep, nowMs), nowMs);
+        maze = collision.maze;
+        score += collision.points;
+        if (collision.isCaught) {
             isDead = true;
         }
-    }
-
-    // Bullets fly smoothly, so they move on their own fast clock rather than
-    // the enemy one; they stop where they are once the guy is dead
-    function stepBullets() {
-        if (isDead) {
-            return;
-        }
-        const nowMs = performance.now();
-        let points = 0;
-        mazes = mazes.map((maze) => {
-            const flight = moveBullets(maze, nowMs);
-            points += flight.points;
-            return flight.maze;
-        });
-        score += points;
-    }
-
-    // Fires a bullet from the guy in every maze, unless he shot too recently
-    function shoot(nowMs) {
-        if (nowMs - lastShotMs < SHOT_COOLDOWN_MS) {
-            return;
-        }
-        lastShotMs = nowMs;
-        mazes = mazes.map((maze) => fireBullet(maze, nowMs));
-    }
-
-    // The maze with a new bullet leaving the middle of the guy's square and
-    // flying straight up, down, left or right along his row or column. It
-    // goes toward the nearest enemy lined up with him with no wall in
-    // between; if there is none, in whichever of the four directions points
-    // most toward the nearest enemy. Enemies walking back can't be targeted.
-    function fireBullet(maze, nowMs) {
-        const [guySqX, guySqY] = getGuySquare(maze);
-        const fromX = (guySqX + 0.5) * CELL_PIXEL_W;
-        const fromY = (guySqY + 0.5) * CELL_PIXEL_H;
-
-        const targets = maze.enemies
-            .map(([sqX, sqY], index) => ({
-                index,
-                sqX,
-                sqY,
-                x: (sqX + 0.5) * CELL_PIXEL_W,
-                y: (sqY + 0.5) * CELL_PIXEL_H,
-            }))
-            .filter(({ index }) => !maze.returningEnemyCorners.has(index))
-            .sort((a, b) => Math.hypot(a.x - fromX, a.y - fromY) - Math.hypot(b.x - fromX, b.y - fromY));
-        if (targets.length === 0) {
-            return maze;
-        }
-
-        let target = targets.find(({ sqX, sqY, x, y }) => (
-            (sqX === guySqX || sqY === guySqY) && hasLineOfSight(maze.walls, fromX, fromY, x, y)
-        ));
-        if (target === undefined) {
-            target = targets[0];
-        }
-
-        // Pick the axis the target is farther along, counted in squares
-        const squaresAcross = target.sqX - guySqX;
-        const squaresDown = target.sqY - guySqY;
-        if (squaresAcross === 0 && squaresDown === 0) {
-            return maze;
-        }
-        let [directionX, directionY] = [Math.sign(squaresAcross), 0];
-        if (Math.abs(squaresDown) > Math.abs(squaresAcross)) {
-            [directionX, directionY] = [0, Math.sign(squaresDown)];
-        }
-
-        const bullet = {
-            x: fromX,
-            y: fromY,
-            vx: directionX * BULLET_SPEED_PX_PER_MS,
-            vy: directionY * BULLET_SPEED_PX_PER_MS,
-            lastMs: nowMs,
-        };
-        return { ...maze, bullets: [...maze.bullets, bullet] };
-    }
-
-    // Moves every bullet to where it is now, in small steps so it can't
-    // skip past a wall or an enemy. A bullet is gone once it hits a wall,
-    // leaves the maze or hits an enemy; a hit enemy scores and starts
-    // walking back to the corner farthest from the guy.
-    function moveBullets(maze, nowMs) {
-        let updated = maze;
-        let points = 0;
-        const remainingBullets = [];
-
-        for (const bullet of maze.bullets) {
-            const travelPx = (nowMs - bullet.lastMs) * BULLET_SPEED_PX_PER_MS;
-            const stepCount = Math.max(1, Math.ceil(travelPx / BULLET_STEP_PX));
-            const stepMs = (nowMs - bullet.lastMs) / stepCount;
-            let x = bullet.x;
-            let y = bullet.y;
-            let isGone = false;
-
-            for (let step = 0; step < stepCount && !isGone; step++) {
-                x += bullet.vx * stepMs;
-                y += bullet.vy * stepMs;
-
-                const isOutside = x < 0 || y < 0 || x >= MAZE_PIXEL_W || y >= MAZE_PIXEL_H;
-                if (isOutside || isPointInWall(updated.walls, x, y)) {
-                    isGone = true;
-                    continue;
-                }
-
-                const hitIndex = findEnemyHitByBullet(updated, x, y, nowMs);
-                if (hitIndex !== -1) {
-                    points += SHOT_ENEMY_POINTS;
-                    updated = {
-                        ...updated,
-                        frightenedEnemyIndexes: new Set([...updated.frightenedEnemyIndexes].filter((index) => index !== hitIndex)),
-                        returningEnemyCorners: new Map([
-                            ...updated.returningEnemyCorners,
-                            [hitIndex, getFarthestFreeCorner(updated, hitIndex)],
-                        ]),
-                    };
-                    isGone = true;
-                }
-            }
-
-            if (!isGone) {
-                remainingBullets.push({ ...bullet, x, y, lastMs: nowMs });
-            }
-        }
-
-        return { maze: { ...updated, bullets: remainingBullets }, points };
-    }
-
-    // Index of the enemy whose drawn box the point is inside, ignoring
-    // enemies already walking back, or -1 if none
-    function findEnemyHitByBullet(maze, x, y, nowMs) {
-        return getEnemyDrawSquares(maze, nowMs).findIndex(([enemyDrawSqX, enemyDrawSqY], i) => {
-            const left = enemyDrawSqX * CELL_PIXEL_W - BULLET_RADIUS_PX;
-            const top = enemyDrawSqY * CELL_PIXEL_H - BULLET_RADIUS_PX;
-            const right = (enemyDrawSqX + 1) * CELL_PIXEL_W + BULLET_RADIUS_PX;
-            const bottom = (enemyDrawSqY + 1) * CELL_PIXEL_H + BULLET_RADIUS_PX;
-            const isInside = x >= left && x <= right && y >= top && y <= bottom;
-            return isInside && !maze.returningEnemyCorners.has(i);
-        });
-    }
-
-    // True if the pixel point is on a wall as drawn: inside one of the bars
-    // of the wall square it falls in
-    function isPointInWall(walls, x, y) {
-        const sqX = Math.floor(x / CELL_PIXEL_W);
-        const sqY = Math.floor(y / CELL_PIXEL_H);
-        if (!walls.has(wallKey(sqX, sqY))) {
-            return false;
-        }
-        return getWallRects(walls, sqX, sqY).some(([left, top, w, h]) => (
-            x >= left && x <= left + w && y >= top && y <= top + h
-        ));
-    }
-
-    // True if a straight line between the two pixel points crosses no wall
-    function hasLineOfSight(walls, fromX, fromY, toX, toY) {
-        const stepCount = Math.ceil(Math.hypot(toX - fromX, toY - fromY) / BULLET_STEP_PX);
-        for (let step = 1; step < stepCount; step++) {
-            const t = step / stepCount;
-            if (isPointInWall(walls, fromX + (toX - fromX) * t, fromY + (toY - fromY) * t)) {
-                return false;
-            }
-        }
-        return true;
     }
 
     function getEnemyStepIntervalMs() {
@@ -540,74 +559,115 @@
         return Math.min(Math.max(value, min), max);
     }
 
-    function wallKey(guySqX, guySqY) {
-        return `${guySqX},${guySqY}`;
+    // value moved toward target by at most maxStep, without overshooting
+    function moveToward(value, target, maxStep) {
+        return value + clamp(target - value, -maxStep, maxStep);
     }
 
-    function getGuySquare(maze) {
-        return [maze.guyX / GUY_WIDTH_SQUARES, maze.guyY / GUY_HEIGHT_SQUARES];
+    function wallKey(squareX, squareY) {
+        return `${squareX},${squareY}`;
     }
 
-    // ---- Moving and eating ----
+    function getGuySquare(currentMaze) {
+        return [Math.floor(currentMaze.guy.x), Math.floor(currentMaze.guy.y)];
+    }
 
-    // The maze with its guy one square along, if no wall is in the way.
-    // He slides from wherever he is drawn now, so quick presses chain
-    // smoothly. Going through the tunnel he appears on the far side.
-    function moveGuy(maze, dxUnits, dyUnits, nowMs) {
-        const [guySqX, guySqY] = getGuySquare(maze);
-        const next = getStepDestination(maze.walls, guySqX, guySqY, dxUnits, dyUnits);
-        if (next === null) {
-            return maze;
-        }
-        const newX = next[0] * GUY_WIDTH_SQUARES;
-        const newY = next[1] * GUY_HEIGHT_SQUARES;
+    // ---- Shooting ----
 
-        let [fromX, fromY] = getGuyDrawPosition(maze, nowMs);
-        if (Math.abs(next[0] - guySqX) > 1) {
-            [fromX, fromY] = [newX, newY];
+    // Fires a bullet straight along the grid the way the guy faces, unless
+    // he shot too recently
+    function shoot(nowMs) {
+        if (nowMs - lastShotMs < SHOT_COOLDOWN_MS) {
+            return;
         }
-
-        // A step soon after the last one carries on the same walk cycle;
-        // otherwise he starts a new one. Moving up or down keeps the way he
-        // last faced.
-        let walkStartMs = nowMs;
-        if (nowMs - maze.guySlide.startMs < GUY_WALK_LINGER_MS) {
-            walkStartMs = maze.guySlide.walkStartMs;
-        }
-        let guyFacing = maze.guyFacing;
-        if (dxUnits !== 0) {
-            guyFacing = Math.sign(dxUnits);
-        }
-
-        return {
-            ...maze,
-            guyX: newX,
-            guyY: newY,
-            guyFacing,
-            guySlide: { fromX, fromY, startMs: nowMs, walkStartMs },
+        lastShotMs = nowMs;
+        const { x, y, angle } = maze.guy;
+        const bullet = {
+            x,
+            y,
+            vx: Math.round(Math.cos(angle)) * BULLET_SPEED_SQUARES_PER_MS,
+            vy: Math.round(Math.sin(angle)) * BULLET_SPEED_SQUARES_PER_MS,
+            lastMs: nowMs,
         };
+        maze = { ...maze, bullets: [...maze.bullets, bullet] };
     }
+
+    // Bullets fly smoothly, so they move on their own fast clock rather than
+    // the enemy one; they stop where they are once the guy is dead
+    function stepBullets() {
+        if (isDead) {
+            return;
+        }
+        const flight = moveBullets(maze, performance.now());
+        maze = flight.maze;
+        score += flight.points;
+    }
+
+    // Moves every bullet to where it is now, in small steps so it can't
+    // skip past a wall or an enemy. A bullet is gone once it hits a wall or
+    // an enemy; a hit enemy scores and starts walking back to the corner
+    // farthest from the guy.
+    function moveBullets(currentMaze, nowMs) {
+        let updated = currentMaze;
+        let points = 0;
+        const remainingBullets = [];
+
+        for (const bullet of currentMaze.bullets) {
+            const elapsedMs = nowMs - bullet.lastMs;
+            const stepCount = Math.max(1, Math.ceil((elapsedMs * BULLET_SPEED_SQUARES_PER_MS) / 0.1));
+            const stepMs = elapsedMs / stepCount;
+            let x = bullet.x;
+            let y = bullet.y;
+            let isGone = false;
+
+            for (let step = 0; step < stepCount && !isGone; step++) {
+                x = (x + bullet.vx * stepMs + WORLD_COLS) % WORLD_COLS;
+                y += bullet.vy * stepMs;
+                if (isWallAt(updated.walls, Math.floor(x), Math.floor(y))) {
+                    isGone = true;
+                    continue;
+                }
+
+                const hitIndex = getEnemyCenters(updated, nowMs).findIndex(({ x: enemyX, y: enemyY }, i) => (
+                    !updated.returningEnemyCorners.has(i)
+                    && getDistanceSquares(x, y, enemyX, enemyY) < BULLET_HIT_RADIUS_SQUARES
+                ));
+                if (hitIndex !== -1) {
+                    points += SHOT_ENEMY_POINTS;
+                    updated = sendEnemyHome(updated, hitIndex);
+                    isGone = true;
+                }
+            }
+
+            if (!isGone) {
+                remainingBullets.push({ ...bullet, x, y, lastMs: nowMs });
+            }
+        }
+
+        return { maze: { ...updated, bullets: remainingBullets }, points };
+    }
+
+    // ---- Eating and catching ----
 
     // The guy eats the dot or power pellet on his square. A power pellet
-    // frightens every enemy in his maze except ones already walking back.
-    function eatAtGuy(maze, nowMs) {
-        const [guySqX, guySqY] = getGuySquare(maze);
-        const guyKey = wallKey(guySqX, guySqY);
-        let updated = maze;
+    // frightens every enemy except ones already walking back.
+    function eatAtGuy(currentMaze, nowMs) {
+        const guyKey = wallKey(...getGuySquare(currentMaze));
+        let updated = currentMaze;
         let points = 0;
 
-        if (maze.dots.has(guyKey)) {
+        if (currentMaze.dots.has(guyKey)) {
             points += POINTS_PER_DOT;
-            updated = { ...updated, dots: new Set([...maze.dots].filter((key) => key !== guyKey)) };
+            updated = { ...updated, dots: new Set([...currentMaze.dots].filter((key) => key !== guyKey)) };
         }
-        if (maze.powerPellets.has(guyKey)) {
+        if (currentMaze.powerPellets.has(guyKey)) {
             points += POWER_PELLET_POINTS;
             updated = {
                 ...updated,
-                powerPellets: new Set([...maze.powerPellets].filter((key) => key !== guyKey)),
+                powerPellets: new Set([...currentMaze.powerPellets].filter((key) => key !== guyKey)),
                 frightenedUntilMs: nowMs + FRIGHTENED_DURATION_MS,
                 frightenedEnemyIndexes: new Set(
-                    [...maze.enemies.keys()].filter((i) => !maze.returningEnemyCorners.has(i))
+                    [...currentMaze.enemies.keys()].filter((i) => !currentMaze.returningEnemyCorners.has(i))
                 ),
             };
         }
@@ -615,57 +675,57 @@
         return { maze: updated, points };
     }
 
-    // Deals with any enemy on the guy's square. A frightened one is eaten:
-    // the guy scores and it starts walking back to the corner farthest from
-    // him. Enemies already walking back are harmless. Any other enemy
-    // catches him. Enemies are drawn up to a square behind where they
-    // really are while gliding, so on a catch every slide finishes at once
-    // and the enemy is shown on the guy.
-    function resolveCollisions(maze, nowMs) {
-        const [guySqX, guySqY] = getGuySquare(maze);
-        let updated = maze;
+    // Deals with any enemy that has reached the guy, judged by where it is
+    // drawn so a catch happens when it visibly reaches him. A frightened one
+    // is eaten: the guy scores and it starts walking back. Enemies already
+    // walking back are harmless. Any other enemy catches him.
+    function resolveCollisions(currentMaze, nowMs) {
+        const { x: guyX, y: guyY } = currentMaze.guy;
+        let updated = currentMaze;
         let points = 0;
 
-        for (let i = 0; i < maze.enemies.length; i++) {
-            const [enemySqX, enemySqY] = maze.enemies[i];
-            const isOnGuy = enemySqX === guySqX && enemySqY === guySqY;
-            if (!isOnGuy || updated.returningEnemyCorners.has(i)) {
+        const centers = getEnemyCenters(currentMaze, nowMs);
+        for (let i = 0; i < centers.length; i++) {
+            const isTouching = getDistanceSquares(guyX, guyY, centers[i].x, centers[i].y) < CATCH_DISTANCE_SQUARES;
+            if (!isTouching || updated.returningEnemyCorners.has(i)) {
                 continue;
             }
-
             if (isEnemyFrightened(updated, i, nowMs)) {
                 points += EATEN_ENEMY_POINTS;
-                updated = {
-                    ...updated,
-                    frightenedEnemyIndexes: new Set([...updated.frightenedEnemyIndexes].filter((index) => index !== i)),
-                    returningEnemyCorners: new Map([...updated.returningEnemyCorners, [i, getFarthestFreeCorner(updated, i)]]),
-                };
+                updated = sendEnemyHome(updated, i);
                 continue;
             }
-
-            const caughtMaze = {
-                ...updated,
-                enemySlides: updated.enemySlides.map((slide) => ({ ...slide, startMs: -Infinity })),
-                guySlide: { ...updated.guySlide, startMs: -Infinity },
-            };
-            return { maze: caughtMaze, points, isCaught: true };
+            return { maze: updated, points, isCaught: true };
         }
 
         return { maze: updated, points, isCaught: false };
     }
 
-    function isEnemyFrightened(maze, index, nowMs) {
-        return nowMs < maze.frightenedUntilMs && maze.frightenedEnemyIndexes.has(index);
+    // The maze with this enemy no longer frightened and walking back to
+    // the corner farthest from the guy
+    function sendEnemyHome(currentMaze, enemyIndex) {
+        return {
+            ...currentMaze,
+            frightenedEnemyIndexes: new Set([...currentMaze.frightenedEnemyIndexes].filter((i) => i !== enemyIndex)),
+            returningEnemyCorners: new Map([
+                ...currentMaze.returningEnemyCorners,
+                [enemyIndex, getFarthestFreeCorner(currentMaze, enemyIndex)],
+            ]),
+        };
+    }
+
+    function isEnemyFrightened(currentMaze, index, nowMs) {
+        return nowMs < currentMaze.frightenedUntilMs && currentMaze.frightenedEnemyIndexes.has(index);
     }
 
     // The maze corner farthest from the guy by walking distance that no
     // other enemy is standing on or heading back to
-    function getFarthestFreeCorner(maze, enemyIndex) {
-        const [guySqX, guySqY] = getGuySquare(maze);
-        const distances = getPathDistances(maze.walls, guySqX, guySqY);
+    function getFarthestFreeCorner(currentMaze, enemyIndex) {
+        const [guySqX, guySqY] = getGuySquare(currentMaze);
+        const distances = getPathDistances(currentMaze.walls, guySqX, guySqY);
         const otherEnemyKeys = new Set([
-            ...maze.enemies.filter((_, index) => index !== enemyIndex).map(([x, y]) => wallKey(x, y)),
-            ...[...maze.returningEnemyCorners.values()].map(([x, y]) => wallKey(x, y)),
+            ...currentMaze.enemies.filter((_, index) => index !== enemyIndex).map(([x, y]) => wallKey(x, y)),
+            ...[...currentMaze.returningEnemyCorners.values()].map(([x, y]) => wallKey(x, y)),
         ]);
         const corners = [
             [1, 1],
@@ -679,23 +739,25 @@
         return freeCorners[0];
     }
 
+    // ---- Enemy movement ----
+
     // The maze after one tick of the enemy clock. Eaten enemies walking
     // back to a corner step every tick. The rest step only on full steps:
     // along the shortest path toward the guy, or in a random direction
     // while frightened, and never onto a square another of them is
     // standing on. Returning enemies pass through everyone.
-    function moveEnemies(maze, isFullStep, nowMs) {
-        const [guySqX, guySqY] = getGuySquare(maze);
-        const distancesFromGuy = getPathDistances(maze.walls, guySqX, guySqY);
+    function moveEnemies(currentMaze, isFullStep, nowMs) {
+        const [guySqX, guySqY] = getGuySquare(currentMaze);
+        const distancesFromGuy = getPathDistances(currentMaze.walls, guySqX, guySqY);
         const movedEnemies = [];
 
-        for (let i = 0; i < maze.enemies.length; i++) {
-            const [enemySqX, enemySqY] = maze.enemies[i];
-            const corner = maze.returningEnemyCorners.get(i);
+        for (let i = 0; i < currentMaze.enemies.length; i++) {
+            const [enemySqX, enemySqY] = currentMaze.enemies[i];
+            const corner = currentMaze.returningEnemyCorners.get(i);
 
             if (corner !== undefined) {
-                const distancesFromCorner = getPathDistances(maze.walls, corner[0], corner[1]);
-                movedEnemies.push(getStepToward(maze.walls, enemySqX, enemySqY, distancesFromCorner, new Set()));
+                const distancesFromCorner = getPathDistances(currentMaze.walls, corner[0], corner[1]);
+                movedEnemies.push(getStepToward(currentMaze.walls, enemySqX, enemySqY, distancesFromCorner, new Set()));
                 continue;
             }
             if (!isFullStep) {
@@ -706,17 +768,17 @@
             // Squares held by the other chasing or frightened enemies, using
             // where the earlier ones have just moved to
             const occupiedKeys = new Set(
-                [...maze.enemies.keys()]
-                    .filter((j) => j !== i && !maze.returningEnemyCorners.has(j))
+                [...currentMaze.enemies.keys()]
+                    .filter((j) => j !== i && !currentMaze.returningEnemyCorners.has(j))
                     .map((j) => {
-                        const [x, y] = j < i ? movedEnemies[j] : maze.enemies[j];
+                        const [x, y] = j < i ? movedEnemies[j] : currentMaze.enemies[j];
                         return wallKey(x, y);
                     })
             );
 
-            if (isEnemyFrightened(maze, i, nowMs)) {
+            if (isEnemyFrightened(currentMaze, i, nowMs)) {
                 const freeSteps = STEP_DIRECTIONS
-                    .map(([dx, dy]) => getStepDestination(maze.walls, enemySqX, enemySqY, dx, dy))
+                    .map(([dx, dy]) => getStepDestination(currentMaze.walls, enemySqX, enemySqY, dx, dy))
                     .filter((next) => next !== null && !occupiedKeys.has(wallKey(next[0], next[1])));
                 let randomStep = [enemySqX, enemySqY];
                 if (freeSteps.length > 0) {
@@ -726,17 +788,17 @@
                 continue;
             }
 
-            movedEnemies.push(getStepToward(maze.walls, enemySqX, enemySqY, distancesFromGuy, occupiedKeys));
+            movedEnemies.push(getStepToward(currentMaze.walls, enemySqX, enemySqY, distancesFromGuy, occupiedKeys));
         }
 
         // Each enemy that took a step slides from wherever it is drawn now
         // to its new square, over the time until its next step. One going
         // through the tunnel appears on the far side instead of sliding back
-        // across the whole board.
+        // across the whole maze.
         const stepIntervalMs = getEnemyStepIntervalMs();
-        const drawSquares = getEnemyDrawSquares(maze, nowMs);
-        const enemySlides = maze.enemySlides.map((slide, i) => {
-            const isReturning = maze.returningEnemyCorners.has(i);
+        const drawSquares = getEnemyDrawSquares(currentMaze, nowMs);
+        const enemySlides = currentMaze.enemySlides.map((slide, i) => {
+            const isReturning = currentMaze.returningEnemyCorners.has(i);
             if (!isReturning && !isFullStep) {
                 return slide;
             }
@@ -755,11 +817,11 @@
         });
 
         // Returning enemies that have reached their corner are back to normal
-        const returningEnemyCorners = new Map([...maze.returningEnemyCorners].filter(([i, [cornerX, cornerY]]) => (
+        const returningEnemyCorners = new Map([...currentMaze.returningEnemyCorners].filter(([i, [cornerX, cornerY]]) => (
             movedEnemies[i][0] !== cornerX || movedEnemies[i][1] !== cornerY
         )));
 
-        return { ...maze, enemies: movedEnemies, enemySlides, returningEnemyCorners };
+        return { ...currentMaze, enemies: movedEnemies, enemySlides, returningEnemyCorners };
     }
 
     // The neighbouring square that is closest by the given walking
@@ -781,6 +843,26 @@
             }
         }
         return bestStep;
+    }
+
+    // How far through a slide we are, from 0 to 1
+    function getSlideProgress(startMs, durationMs, nowMs) {
+        return clamp((nowMs - startMs) / durationMs, 0, 1);
+    }
+
+    // Enemies' drawn squares (top-left corners, fractional while gliding).
+    // Linear, so back-to-back steps join into one steady glide.
+    function getEnemyDrawSquares(currentMaze, nowMs) {
+        return currentMaze.enemies.map(([x, y], i) => {
+            const { fromX, fromY, startMs, durationMs } = currentMaze.enemySlides[i];
+            const t = getSlideProgress(startMs, durationMs, nowMs);
+            return [fromX + (x - fromX) * t, fromY + (y - fromY) * t];
+        });
+    }
+
+    // Middle of each enemy where it is drawn, as { x, y } in squares
+    function getEnemyCenters(currentMaze, nowMs) {
+        return getEnemyDrawSquares(currentMaze, nowMs).map(([x, y]) => ({ x: x + 0.5, y: y + 0.5 }));
     }
 
     // ---- Paths ----
@@ -844,8 +926,7 @@
     // Builds the maze on a lattice. "Rooms" at odd (x, y) are always open,
     // "pillars" at even (x, y) are always wall, and each square between two
     // neighbouring rooms is either a wall or a gap. Corridors are therefore
-    // one square wide, so no open area is bigger than 2x2, and no 2x2 block
-    // is ever all wall.
+    // one square wide, so no open area is bigger than 2x2.
     function generateMazeWalls([guySqX, guySqY]) {
         const walls = new Set();
 
@@ -1156,121 +1237,481 @@
         return starts;
     }
 
-    // ---- Drawing ----
+    // ---- Drawing: first-person view ----
 
-    function renderFrame(nowMs) {
-        draw(nowMs);
+    function renderFrame() {
+        draw(performance.now());
         requestAnimationFrame(renderFrame);
     }
 
     function draw(nowMs) {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
-        mazes.forEach((maze, mazeIndex) => drawMaze(maze, mazeIndex, nowMs));
-        drawLevelInfo(nowMs);
+
+        const camera = getCamera(maze, nowMs);
+        drawCeilingAndFloor(camera);
+        const wallDepths = drawWalls(maze.walls, camera);
+        drawWorldObjects(maze, camera, wallDepths, nowMs);
+        drawGun(maze, nowMs);
+        drawCrosshair();
+        drawMinimap(maze, nowMs);
+        drawStatusBar(nowMs);
 
         if (isDead) {
             drawDeathMessage();
         }
     }
 
-    function drawMaze(maze, mazeIndex, nowMs) {
-        ctx.save();
-        ctx.translate(maze.originPx, 0);
+    // Where the guy's eye is and which way it looks, as used for every ray:
+    // direction is his facing, plane points to his right and is as long as
+    // the half-width of the view one square ahead. horizonY is the screen
+    // row of eye level, bobbing as he walks.
+    function getCamera(currentMaze, nowMs) {
+        const { x, y } = currentMaze.guy;
+        const angle = getGuyViewAngle(currentMaze.guy, nowMs);
+        const planeLength = Math.tan(FIELD_OF_VIEW_RADIANS / 2);
 
-        ctx.fillStyle = BACKGROUND_COLOR;
-        ctx.fillRect(0, 0, MAZE_PIXEL_W, MAZE_PIXEL_H);
-
-        drawWalls(maze.walls);
-        drawDots(maze);
-        getEnemyDrawSquares(maze, nowMs).forEach(([enemyDrawSqX, enemyDrawSqY], i) => {
-            const x = enemyDrawSqX * GUY_WIDTH_SQUARES;
-            const y = enemyDrawSqY * GUY_HEIGHT_SQUARES;
-            if (maze.returningEnemyCorners.has(i)) {
-                drawGuyOutline(x, y, RETURNING_ENEMY_OUTLINE_COLOR);
-                return;
-            }
-            drawGuy(x, y, getEnemyColors(maze, mazeIndex, i, nowMs));
-        });
-        const [guyDrawX, guyDrawY] = getGuyDrawPosition(maze, nowMs);
-        drawWalkingGuy(guyDrawX, guyDrawY, GUY_COLORS, getGuyWalkPhase(maze, nowMs), maze.guyFacing);
-
-        ctx.fillStyle = BULLET_COLOR;
-        for (const { x, y } of maze.bullets) {
-            ctx.beginPath();
-            ctx.arc(x, y, BULLET_RADIUS_PX, 0, Math.PI * 2);
-            ctx.fill();
+        let bob = 0;
+        if (nowMs - currentMaze.lastWalkMs < WALK_BOB_LINGER_MS) {
+            bob = HEAD_BOB_PX * Math.sin(currentMaze.walkDistance * HEAD_BOB_PER_SQUARE * Math.PI);
         }
 
-        ctx.restore();
+        return {
+            x,
+            y,
+            dirX: Math.cos(angle),
+            dirY: Math.sin(angle),
+            planeX: -Math.sin(angle) * planeLength,
+            planeY: Math.cos(angle) * planeLength,
+            horizonY: VIEW_H / 2 + bob,
+        };
     }
 
-    // How far through a slide we are, from 0 to 1
-    function getSlideProgress(startMs, durationMs, nowMs) {
-        return clamp((nowMs - startMs) / durationMs, 0, 1);
+    function drawCeilingAndFloor({ horizonY }) {
+        const ceiling = ctx.createLinearGradient(0, 0, 0, horizonY);
+        ceiling.addColorStop(0, CEILING_TOP_COLOR);
+        ceiling.addColorStop(1, CEILING_HORIZON_COLOR);
+        ctx.fillStyle = ceiling;
+        ctx.fillRect(0, 0, VIEW_W, horizonY);
+
+        const floor = ctx.createLinearGradient(0, horizonY, 0, VIEW_H);
+        floor.addColorStop(0, FLOOR_HORIZON_COLOR);
+        floor.addColorStop(1, FLOOR_NEAR_COLOR);
+        ctx.fillStyle = floor;
+        ctx.fillRect(0, horizonY, VIEW_W, VIEW_H - horizonY);
     }
 
-    // Guy's drawn position in pixel-grid squares, part way along his slide.
-    // Eased so he starts quickly and settles gently into the new square.
-    function getGuyDrawPosition(maze, nowMs) {
-        const { fromX, fromY, startMs } = maze.guySlide;
-        const t = 1 - (1 - getSlideProgress(startMs, GUY_SLIDE_MS, nowMs)) ** 3;
-        return [fromX + (maze.guyX - fromX) * t, fromY + (maze.guyY - fromY) * t];
+    // Casts one ray per screen column through the grid and draws the wall
+    // it hits as a vertical strip of brick. Returns each column's wall
+    // distance, so nearer things can be drawn in front and farther ones
+    // hidden behind.
+    function drawWalls(walls, camera) {
+        const wallDepths = new Array(VIEW_W).fill(Infinity);
+
+        for (let column = 0; column < VIEW_W; column++) {
+            const cameraX = (2 * column) / VIEW_W - 1;
+            const rayX = camera.dirX + camera.planeX * cameraX;
+            const rayY = camera.dirY + camera.planeY * cameraX;
+            const hit = castRay(walls, camera.x, camera.y, rayX, rayY);
+            if (hit === null) {
+                continue;
+            }
+            wallDepths[column] = hit.distance;
+            drawWallColumn(column, hit, camera.horizonY);
+        }
+
+        return wallDepths;
     }
 
-    // Enemies' drawn positions in guy-unit squares, part way along their
-    // slides. Linear, so back-to-back steps join into one steady glide.
-    function getEnemyDrawSquares(maze, nowMs) {
-        return maze.enemies.map(([x, y], i) => {
-            const { fromX, fromY, startMs, durationMs } = maze.enemySlides[i];
-            const t = getSlideProgress(startMs, durationMs, nowMs);
-            return [fromX + (x - fromX) * t, fromY + (y - fromY) * t];
+    // Steps a ray square by square from (x, y) until it enters a wall.
+    // Returns how far it went measured straight ahead (so walls don't
+    // bulge like a fish-eye), which way the face it hit runs, where along
+    // that face it hit (0 to 1), and which square, or null if it hits
+    // nothing within MAX_RAY_STEPS squares.
+    function castRay(walls, x, y, rayX, rayY) {
+        let squareX = Math.floor(x);
+        let squareY = Math.floor(y);
+        const deltaX = Math.abs(1 / rayX);
+        const deltaY = Math.abs(1 / rayY);
+
+        let stepX = 1;
+        let sideDistX = (squareX + 1 - x) * deltaX;
+        if (rayX < 0) {
+            stepX = -1;
+            sideDistX = (x - squareX) * deltaX;
+        }
+        let stepY = 1;
+        let sideDistY = (squareY + 1 - y) * deltaY;
+        if (rayY < 0) {
+            stepY = -1;
+            sideDistY = (y - squareY) * deltaY;
+        }
+
+        for (let step = 0; step < MAX_RAY_STEPS; step++) {
+            let isNorthSouthFace = false;
+            if (sideDistX < sideDistY) {
+                sideDistX += deltaX;
+                squareX += stepX;
+                isNorthSouthFace = true;
+            } else {
+                sideDistY += deltaY;
+                squareY += stepY;
+            }
+            if (!isWallAt(walls, squareX, squareY)) {
+                continue;
+            }
+
+            let distance = sideDistY - deltaY;
+            let hitAlong = x + distance * rayX;
+            if (isNorthSouthFace) {
+                distance = sideDistX - deltaX;
+                hitAlong = y + distance * rayY;
+            }
+            return {
+                distance: Math.max(distance, 0.001),
+                isNorthSouthFace,
+                hitAlong: hitAlong - Math.floor(hitAlong),
+                squareX,
+                squareY,
+            };
+        }
+        return null;
+    }
+
+    // One screen column of brick wall: rows of bricks, staggered every other
+    // row, each brick a slightly different shade, with mortar lines between,
+    // all dimmed by distance
+    function drawWallColumn(column, { distance, isNorthSouthFace, hitAlong, squareX, squareY }, horizonY) {
+        const wallHeight = VIEW_H / distance;
+        const wallTop = horizonY - wallHeight / 2;
+        const rowHeight = wallHeight / BRICK_ROWS;
+
+        let light = clamp(1 - distance / FOG_DISTANCE_SQUARES, MIN_LIGHT, 1);
+        if (isNorthSouthFace) {
+            light *= SIDE_WALL_SHADE;
+        }
+
+        for (let row = 0; row < BRICK_ROWS; row++) {
+            const rowTop = wallTop + row * rowHeight;
+            const along = hitAlong * BRICKS_PER_SQUARE + (row % 2) * 0.5;
+            const brickIndex = Math.floor(along);
+            const isMortarColumn = along - brickIndex < MORTAR_SHARE;
+
+            let rgb = MORTAR_RGB;
+            if (!isMortarColumn) {
+                const variation = getBrickVariation(squareX, squareY, row, brickIndex, isNorthSouthFace);
+                rgb = WALL_BASE_RGB.map((channel) => channel * (1 + variation));
+            }
+            ctx.fillStyle = toColor(rgb, light);
+            ctx.fillRect(column, rowTop, 1, rowHeight + 0.5);
+
+            // Mortar line along the bottom of each row of bricks
+            ctx.fillStyle = toColor(MORTAR_RGB, light);
+            ctx.fillRect(column, rowTop + rowHeight * (1 - MORTAR_SHARE), 1, rowHeight * MORTAR_SHARE + 0.5);
+        }
+    }
+
+    // A steady random shade, from -BRICK_SHADE_VARIATION to
+    // +BRICK_SHADE_VARIATION, for one brick, so each brick keeps its own look
+    function getBrickVariation(squareX, squareY, row, brickIndex, isNorthSouthFace) {
+        let seed = squareX * 73856093 ^ squareY * 19349663 ^ row * 83492791 ^ brickIndex * 2654435761;
+        if (isNorthSouthFace) {
+            seed ^= 0x5bd1e995;
+        }
+        seed = Math.imul(seed ^ (seed >>> 15), 0x2c1b3c6d);
+        seed = Math.imul(seed ^ (seed >>> 12), 0x297a2d39);
+        const unit = ((seed ^ (seed >>> 15)) >>> 0) / 4294967296;
+        return (unit * 2 - 1) * BRICK_SHADE_VARIATION;
+    }
+
+    function toColor(rgb, light) {
+        const [r, g, b] = rgb.map((channel) => Math.round(clamp(channel * light, 0, 255)));
+        return `rgb(${r}, ${g}, ${b})`;
+    }
+
+    // Where a point in the maze lands on screen: its column, its distance
+    // straight ahead, and the pixel size of one wall-height there. null if
+    // it is behind the guy.
+    function projectPoint(camera, worldX, worldY) {
+        const relativeX = getWrappedDeltaX(camera.x, worldX);
+        const relativeY = worldY - camera.y;
+        const inverse = 1 / (camera.planeX * camera.dirY - camera.dirX * camera.planeY);
+        const sideways = inverse * (camera.dirY * relativeX - camera.dirX * relativeY);
+        const depth = inverse * (-camera.planeY * relativeX + camera.planeX * relativeY);
+        if (depth <= 0.05) {
+            return null;
+        }
+        return {
+            screenX: (VIEW_W / 2) * (1 + sideways / depth),
+            depth,
+            unitPx: VIEW_H / depth,
+        };
+    }
+
+    // Enemies, dots, pellets and bullets, drawn farthest first so nearer
+    // ones cover them, and each hidden wherever a wall is closer
+    function drawWorldObjects(currentMaze, camera, wallDepths, nowMs) {
+        const objects = [];
+
+        for (const key of currentMaze.dots) {
+            const [x, y] = key.split(",").map(Number);
+            objects.push({ x: x + 0.5, y: y + 0.5, kind: "ball", heightShare: DOT_HEIGHT_SHARE, radiusShare: DOT_RADIUS_SHARE, color: DOT_COLOR });
+        }
+        for (const key of currentMaze.powerPellets) {
+            const [x, y] = key.split(",").map(Number);
+            // Pellets pulse gently so they catch the eye down a corridor
+            const pulse = 1 + 0.15 * Math.sin(nowMs / 150);
+            objects.push({ x: x + 0.5, y: y + 0.5, kind: "ball", heightShare: DOT_HEIGHT_SHARE, radiusShare: POWER_PELLET_RADIUS_SHARE * pulse, color: DOT_COLOR });
+        }
+        for (const { x, y } of currentMaze.bullets) {
+            objects.push({ x, y, kind: "ball", heightShare: BULLET_HEIGHT_SHARE, radiusShare: BULLET_RADIUS_SHARE, color: BULLET_COLOR });
+        }
+        getEnemyCenters(currentMaze, nowMs).forEach(({ x, y }, i) => {
+            objects.push({ x, y, kind: "enemy", index: i });
         });
+
+        const projected = objects
+            .map((object) => ({ object, view: projectPoint(camera, object.x, object.y) }))
+            .filter(({ view }) => view !== null)
+            .sort((a, b) => b.view.depth - a.view.depth);
+
+        for (const { object, view } of projected) {
+            if (object.kind === "enemy") {
+                drawEnemy(currentMaze, object.index, view, camera, wallDepths, nowMs);
+                continue;
+            }
+            drawBall(object, view, camera, wallDepths);
+        }
+    }
+
+    // A round thing (dot, pellet, bullet) floating at its height, dimmed
+    // by distance, drawn only if no wall is in front of it
+    function drawBall({ heightShare, radiusShare, color }, view, camera, wallDepths) {
+        const column = Math.round(view.screenX);
+        if (column < 0 || column >= VIEW_W || wallDepths[column] < view.depth) {
+            return;
+        }
+        const floorY = camera.horizonY + view.unitPx / 2;
+        const centerY = floorY - heightShare * view.unitPx;
+        const radius = Math.max(1, radiusShare * view.unitPx);
+        const light = clamp(1 - view.depth / FOG_DISTANCE_SQUARES, MIN_LIGHT, 1);
+
+        ctx.globalAlpha = 0.35 + 0.65 * light;
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.arc(view.screenX, centerY, radius, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+    }
+
+    // An enemy standing on the floor, drawn one screen column at a time so
+    // a wall in front of part of it hides just that part
+    function drawEnemy(currentMaze, index, view, camera, wallDepths, nowMs) {
+        let sprite = getEnemySprite(getEnemyColor(currentMaze, index, nowMs));
+        let alpha = clamp(1 - view.depth / FOG_DISTANCE_SQUARES, MIN_LIGHT, 1) * 0.5 + 0.5;
+        if (currentMaze.returningEnemyCorners.has(index)) {
+            sprite = getEnemySprite(RETURNING_ENEMY_COLOR);
+            alpha = RETURNING_ENEMY_ALPHA;
+        }
+
+        const height = ENEMY_HEIGHT_SHARE * view.unitPx;
+        const width = (height * sprite.width) / sprite.height;
+        const floorY = camera.horizonY + view.unitPx / 2;
+        const top = floorY - height;
+        const left = view.screenX - width / 2;
+
+        ctx.imageSmoothingEnabled = false;
+        ctx.globalAlpha = alpha;
+        const firstColumn = Math.max(0, Math.floor(left));
+        const lastColumn = Math.min(VIEW_W - 1, Math.ceil(left + width));
+        for (let column = firstColumn; column <= lastColumn; column++) {
+            if (wallDepths[column] < view.depth) {
+                continue;
+            }
+            const sourceX = Math.floor(((column - left) / width) * sprite.width);
+            if (sourceX < 0 || sourceX >= sprite.width) {
+                continue;
+            }
+            ctx.drawImage(sprite, sourceX, 0, 1, sprite.height, column, top, 1, height);
+        }
+        ctx.globalAlpha = 1;
     }
 
     // Normal colour, or grey while frightened, flashing white at an even
     // pace as the power runs out
-    function getEnemyColors(maze, mazeIndex, index, nowMs) {
-        if (!isEnemyFrightened(maze, index, nowMs)) {
-            return ENEMY_COLORS[(mazeIndex * ENEMIES_PER_MAZE + index) % ENEMY_COLORS.length];
+    function getEnemyColor(currentMaze, index, nowMs) {
+        if (!isEnemyFrightened(currentMaze, index, nowMs)) {
+            return ENEMY_BODY_COLORS[index % ENEMY_BODY_COLORS.length];
         }
 
         // Counting 250 ms blocks back from the end, odd blocks are white, so
         // the first flash starts exactly FRIGHTENED_FLASH_FINAL_MS out and
         // every flash and gap is a full block
-        const msLeft = maze.frightenedUntilMs - nowMs;
+        const msLeft = currentMaze.frightenedUntilMs - nowMs;
         const isFlashOn = Math.floor(msLeft / FRIGHTENED_FLASH_PERIOD_MS) % 2 === 1;
         if (msLeft < FRIGHTENED_FLASH_FINAL_MS && isFlashOn) {
-            return FRIGHTENED_FLASH_COLORS;
+            return FRIGHTENED_FLASH_COLOR;
         }
-        return FRIGHTENED_ENEMY_COLORS;
+        return FRIGHTENED_ENEMY_COLOR;
     }
 
-    // Returns the [x, y, w, h] pixel rects that make up one wall square.
-    // A wall is a bar through the middle of its square, half a square
-    // thick, with arms that reach out to touch neighbouring walls.
-    function getWallRects(walls, guySqX, guySqY) {
-        const left = guySqX * CELL_PIXEL_W;
-        const top = guySqY * CELL_PIXEL_H;
-        const barLeft = left + CELL_PIXEL_W / 4;
-        const barTop = top + CELL_PIXEL_H / 4;
+    // The enemy's blocky shape (a bar across the top and a leg down each
+    // side) in one colour, drawn into its own small canvas the first time
+    // it is needed
+    function getEnemySprite(color) {
+        if (!enemySpriteCache.has(color)) {
+            const block = ENEMY_SPRITE_BLOCK_PX;
+            const sprite = document.createElement("canvas");
+            sprite.width = 4 * block;
+            sprite.height = 3 * block;
+            const spriteCtx = sprite.getContext("2d");
+            spriteCtx.fillStyle = color;
+            spriteCtx.fillRect(0, 0, 4 * block, block);
+            spriteCtx.fillRect(0, 0, block, 3 * block);
+            spriteCtx.fillRect(3 * block, 0, block, 3 * block);
+            enemySpriteCache.set(color, sprite);
+        }
+        return enemySpriteCache.get(color);
+    }
 
-        const hasUp = walls.has(wallKey(guySqX, guySqY - 1));
-        const hasDown = walls.has(wallKey(guySqX, guySqY + 1));
-        const hasLeft = walls.has(wallKey(guySqX - 1, guySqY));
-        const hasRight = walls.has(wallKey(guySqX + 1, guySqY));
+    // The guy's gun at the bottom of the view, swaying as he walks, with a
+    // muzzle flash just after a shot
+    function drawGun(currentMaze, nowMs) {
+        let swayX = 0;
+        let swayY = 0;
+        if (nowMs - currentMaze.lastWalkMs < WALK_BOB_LINGER_MS) {
+            const phase = currentMaze.walkDistance * HEAD_BOB_PER_SQUARE * Math.PI;
+            swayX = 10 * Math.sin(phase / 2);
+            swayY = 6 * Math.abs(Math.sin(phase / 2));
+        }
+        const centerX = VIEW_W / 2 + swayX;
+        const baseY = VIEW_H + swayY;
 
-        const hasHorizontalNeighbour = hasLeft || hasRight;
-        const hasVerticalNeighbour = hasUp || hasDown;
+        if (nowMs - lastShotMs < GUN_FLASH_MS) {
+            const flash = ctx.createRadialGradient(centerX, baseY - 150, 0, centerX, baseY - 150, 45);
+            flash.addColorStop(0, "rgba(255, 250, 200, 1)");
+            flash.addColorStop(0.4, "rgba(255, 190, 60, 0.8)");
+            flash.addColorStop(1, "rgba(255, 120, 0, 0)");
+            ctx.fillStyle = flash;
+            ctx.fillRect(centerX - 50, baseY - 200, 100, 100);
+        }
+
+        // Grip and hand
+        ctx.fillStyle = "#6b4a32";
+        ctx.fillRect(centerX - 30, baseY - 60, 60, 60);
+        // Body
+        ctx.fillStyle = "#3a3a42";
+        ctx.fillRect(centerX - 26, baseY - 110, 52, 60);
+        // Barrel
+        ctx.fillStyle = "#26262c";
+        ctx.fillRect(centerX - 12, baseY - 150, 24, 45);
+        // Highlight along the left edge
+        ctx.fillStyle = "#5a5a66";
+        ctx.fillRect(centerX - 26, baseY - 110, 6, 60);
+        ctx.fillRect(centerX - 12, baseY - 150, 4, 45);
+    }
+
+    function drawCrosshair() {
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.6)";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(VIEW_W / 2 - 8, VIEW_H / 2);
+        ctx.lineTo(VIEW_W / 2 + 8, VIEW_H / 2);
+        ctx.moveTo(VIEW_W / 2, VIEW_H / 2 - 8);
+        ctx.lineTo(VIEW_W / 2, VIEW_H / 2 + 8);
+        ctx.stroke();
+    }
+
+    // The automap: the original flat 2D game in the top-right corner, drawn
+    // at its own size and shrunk. Black floor, bevelled stone wall bars,
+    // yellow dots and pellets, the enemies as their blocky shapes (grey or
+    // flashing when frightened, a faint outline when walking back), and the
+    // guy as his four-colour shape with a wedge showing his facing.
+    function drawMinimap(currentMaze, nowMs) {
+        const mapW = WORLD_COLS * MAP_CELL_W;
+        const mapH = WORLD_ROWS * MAP_CELL_H;
+        const left = VIEW_W - MINIMAP_MARGIN_PX - mapW * MINIMAP_SCALE;
+
+        ctx.save();
+        ctx.translate(left, MINIMAP_MARGIN_PX);
+        ctx.scale(MINIMAP_SCALE, MINIMAP_SCALE);
+
+        ctx.fillStyle = "#000";
+        ctx.fillRect(0, 0, mapW, mapH);
+        drawMapWalls(currentMaze.walls);
+
+        ctx.fillStyle = DOT_COLOR;
+        const circles = [
+            ...[...currentMaze.dots].map((key) => [key, MAP_DOT_RADIUS_PX]),
+            ...[...currentMaze.powerPellets].map((key) => [key, MAP_PELLET_RADIUS_PX]),
+        ];
+        for (const [key, radius] of circles) {
+            const [x, y] = key.split(",").map(Number);
+            ctx.beginPath();
+            ctx.arc((x + 0.5) * MAP_CELL_W, (y + 0.5) * MAP_CELL_H, radius, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        getEnemyDrawSquares(currentMaze, nowMs).forEach(([x, y], i) => {
+            const mapX = x * MAP_CELL_W;
+            const mapY = y * MAP_CELL_H;
+            if (currentMaze.returningEnemyCorners.has(i)) {
+                drawMapGuyOutline(mapX, mapY, MAP_RETURNING_ENEMY_OUTLINE_COLOR);
+                return;
+            }
+            const color = getEnemyColor(currentMaze, i, nowMs);
+            drawMapGuy(mapX, mapY, { left: color, top: [color, color], right: color });
+        });
+
+        const { x, y } = currentMaze.guy;
+        const guyLeft = (x - 0.5) * MAP_CELL_W;
+        const guyTop = (y - 0.5) * MAP_CELL_H;
+        drawMapGuy(guyLeft, guyTop, MAP_GUY_COLORS);
+
+        // Wedge just in front of him, pointing the way he looks
+        const angle = getGuyViewAngle(currentMaze.guy, nowMs);
+        const centerX = x * MAP_CELL_W;
+        const centerY = y * MAP_CELL_H;
+        const reach = MAP_CELL_W * 0.8;
+        ctx.fillStyle = MAP_FACING_WEDGE_COLOR;
+        ctx.beginPath();
+        ctx.moveTo(centerX + Math.cos(angle) * reach, centerY + Math.sin(angle) * reach);
+        ctx.lineTo(centerX + Math.cos(angle + 0.45) * reach * 0.6, centerY + Math.sin(angle + 0.45) * reach * 0.6);
+        ctx.lineTo(centerX + Math.cos(angle - 0.45) * reach * 0.6, centerY + Math.sin(angle - 0.45) * reach * 0.6);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.restore();
+
+        // Thin frame round the map
+        ctx.strokeStyle = "#5a5a5a";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(left - 1, MINIMAP_MARGIN_PX - 1, mapW * MINIMAP_SCALE + 2, mapH * MINIMAP_SCALE + 2);
+    }
+
+    // The [x, y, w, h] map-pixel rects that make up one wall square. A wall
+    // is a bar through the middle of its square, half a square thick, with
+    // arms that reach out to touch neighbouring walls.
+    function getMapWallRects(walls, squareX, squareY) {
+        const left = squareX * MAP_CELL_W;
+        const top = squareY * MAP_CELL_H;
+        const barLeft = left + MAP_CELL_W / 4;
+        const barTop = top + MAP_CELL_H / 4;
+
+        const hasUp = walls.has(wallKey(squareX, squareY - 1));
+        const hasDown = walls.has(wallKey(squareX, squareY + 1));
+        const hasLeft = walls.has(wallKey(squareX - 1, squareY));
+        const hasRight = walls.has(wallKey(squareX + 1, squareY));
 
         // Straight runs span the whole square in one direction;
         // corners and junctions only reach toward the walls they touch
+        const hasHorizontalNeighbour = hasLeft || hasRight;
+        const hasVerticalNeighbour = hasUp || hasDown;
         const spansHorizontally = hasHorizontalNeighbour && !hasVerticalNeighbour;
         const spansVertically = hasVerticalNeighbour && !hasHorizontalNeighbour;
 
-        const halfW = CELL_PIXEL_W / 2;
-        const halfH = CELL_PIXEL_H / 2;
+        const halfW = MAP_CELL_W / 2;
+        const halfH = MAP_CELL_H / 2;
         const rects = [[barLeft, barTop, halfW, halfH]];
-
         if (hasLeft || spansHorizontally) {
             rects.push([left, barTop, halfW, halfH]);
         }
@@ -1283,12 +1724,11 @@
         if (hasDown || spansVertically) {
             rects.push([barLeft, top + halfH, halfW, halfH]);
         }
-
         return rects;
     }
 
-    // Builds one path from all the wall rects, shifted diagonally by offset
-    function createWallPath(rects, offset) {
+    // One path from all the wall rects, shifted diagonally by offset
+    function createMapWallPath(rects, offset) {
         const path = new Path2D();
         for (const [x, y, w, h] of rects) {
             path.rect(x + offset, y + offset, w, h);
@@ -1296,65 +1736,52 @@
         return path;
     }
 
-    function drawWalls(walls) {
-        const rects = [];
-        for (const key of walls) {
-            const [guySqX, guySqY] = key.split(",").map(Number);
-            rects.push(...getWallRects(walls, guySqX, guySqY));
+    // The walls' outline, highlight and face paths for a maze, worked out
+    // once since walls never change during a level
+    const mapWallPathsByWalls = new WeakMap();
+    function getMapWallPaths(walls) {
+        if (!mapWallPathsByWalls.has(walls)) {
+            const rects = [...walls].flatMap((key) => getMapWallRects(walls, ...key.split(",").map(Number)));
+            mapWallPathsByWalls.set(walls, {
+                wallPath: createMapWallPath(rects, 0),
+                shiftedUpLeftPath: createMapWallPath(rects, -MAP_WALL_BEVEL_PX),
+                shiftedDownRightPath: createMapWallPath(rects, MAP_WALL_BEVEL_PX),
+            });
         }
+        return mapWallPathsByWalls.get(walls);
+    }
 
-        // All walls are filled as one shape, so touching walls merge with
-        // no seams and the bevel only runs along the outside edge
-        const wallPath = createWallPath(rects, 0);
-        const shiftedUpLeftPath = createWallPath(rects, -WALL_BEVEL_PX);
-        const shiftedDownRightPath = createWallPath(rects, WALL_BEVEL_PX);
+    // All walls are filled as one shape, so touching walls merge with no
+    // seams and the bevel only runs along the outside edge
+    function drawMapWalls(walls) {
+        const { wallPath, shiftedUpLeftPath, shiftedDownRightPath } = getMapWallPaths(walls);
 
         ctx.save();
         ctx.clip(wallPath);
 
         // Shadow along the bottom-right edges
-        ctx.fillStyle = WALL_DARK_COLOR;
+        ctx.fillStyle = MAP_WALL_DARK_COLOR;
         ctx.fill(wallPath);
 
         // Highlight along the top-left edges
-        ctx.fillStyle = WALL_LIGHT_COLOR;
+        ctx.fillStyle = MAP_WALL_LIGHT_COLOR;
         ctx.fill(shiftedUpLeftPath);
 
         // Stone face, inset from both bevels
         ctx.clip(shiftedDownRightPath);
-        ctx.fillStyle = WALL_FACE_COLOR;
+        ctx.fillStyle = MAP_WALL_FACE_COLOR;
         ctx.fill(shiftedUpLeftPath);
 
         ctx.restore();
     }
 
-    function drawDots(maze) {
-        ctx.fillStyle = DOT_COLOR;
-        const circles = [
-            ...[...maze.dots].map((key) => [key, DOT_RADIUS_PX]),
-            ...[...maze.powerPellets].map((key) => [key, POWER_PELLET_RADIUS_PX]),
-        ];
-        for (const [key, radius] of circles) {
-            const [x, y] = key.split(",").map(Number);
-            ctx.beginPath();
-            ctx.arc((x + 0.5) * CELL_PIXEL_W, (y + 0.5) * CELL_PIXEL_H, radius, 0, Math.PI * 2);
-            ctx.fill();
-        }
-    }
-
-    // Draws an enemy-style guy whose top-left is at (x, y) in pixel-grid
-    // squares: a 4x3 block shape with a bar across the top and a leg down
-    // each side. x and y may be fractional while he slides; the pixel
-    // position is rounded so his edges stay crisp.
-    function drawGuy(x, y, colors) {
-        const left = Math.round(x * PIXEL_RES);
-        const top = Math.round(y * PIXEL_RES);
-
-        // Fill his whole box first so nothing behind him shows through
-        if (colors.inside) {
-            ctx.fillStyle = colors.inside;
-            ctx.fillRect(left, top, CELL_PIXEL_W, CELL_PIXEL_H);
-        }
+    // A guy's blocky shape with its top-left at (left, top) in map pixels:
+    // a bar across the top and a leg down each side, with black filling the
+    // space under the bar so dots don't show through
+    function drawMapGuy(left, top, colors) {
+        const block = MAP_BLOCK_PX;
+        ctx.fillStyle = "#000";
+        ctx.fillRect(left, top, MAP_CELL_W, MAP_CELL_H);
 
         const blocks = [
             [0, 0, colors.left], [0, 1, colors.left], [0, 2, colors.left],
@@ -1363,147 +1790,57 @@
         ];
         for (const [col, row, color] of blocks) {
             ctx.fillStyle = color;
-            ctx.fillRect(left + col * PIXEL_RES, top + row * PIXEL_RES, PIXEL_RES, PIXEL_RES);
+            ctx.fillRect(left + col * block, top + row * block, block, block);
         }
     }
 
-    // Draws the player's guy, top-left at (x, y) in pixel-grid squares,
-    // facing right (facing = 1) or left (-1). walkPhase is how far through
-    // his walk cycle he is, from 0 to 1, or null while he stands still.
-    function drawWalkingGuy(x, y, colors, walkPhase, facing) {
-        const left = x * PIXEL_RES;
-        const top = y * PIXEL_RES;
-        const middleX = left + CELL_PIXEL_W / 2;
+    // Just the outline of a guy's shape, with nothing filled in
+    function drawMapGuyOutline(left, top, color) {
+        const block = MAP_BLOCK_PX;
 
-        if (colors.inside) {
-            ctx.fillStyle = colors.inside;
-            ctx.fillRect(Math.round(left), Math.round(top), CELL_PIXEL_W, CELL_PIXEL_H);
-        }
-
-        // Each leg's thigh angle from straight down (positive is forward) and
-        // knee bend, in degrees. The two legs are half a cycle apart.
-        let legAngles = [{ hip: 0, knee: 0 }, { hip: 0, knee: 0 }];
-        let bodyRise = 0;
-        if (walkPhase !== null) {
-            legAngles = [walkPhase, walkPhase + 0.5].map((phase) => {
-                const turn = 2 * Math.PI * phase;
-                // A leg swings forward while its hip angle is rising, which is
-                // when sin(turn) is negative; that is when its knee bends
-                const swing = Math.max(0, -Math.sin(turn));
-                return {
-                    hip: GUY_HIP_SWING_DEG * Math.cos(turn),
-                    knee: GUY_STANCE_KNEE_BEND_DEG + (GUY_KNEE_BEND_DEG - GUY_STANCE_KNEE_BEND_DEG) * swing,
-                };
-            });
-            // Highest as the legs pass each other, lowest with feet apart
-            bodyRise = GUY_BODY_BOB_PX * Math.abs(Math.sin(2 * Math.PI * walkPhase));
-        }
-
-        const bodyTop = top - bodyRise;
-        const hipY = bodyTop + GUY_BODY_HEIGHT_PX;
-        const toRadians = (degrees) => (degrees * Math.PI) / 180;
-
-        // Far leg first so the near one is drawn over it
-        const legs = [
-            { angles: legAngles[1], hipX: middleX - GUY_HIP_OFFSET_PX * facing, color: colors.left },
-            { angles: legAngles[0], hipX: middleX + GUY_HIP_OFFSET_PX * facing, color: colors.right },
-        ];
-        ctx.lineWidth = GUY_LEG_WIDTH_PX;
-        ctx.lineCap = "round";
-        ctx.lineJoin = "round";
-        for (const { angles, hipX, color } of legs) {
-            const thighAngle = toRadians(angles.hip);
-            const shinAngle = thighAngle - toRadians(angles.knee);
-            const kneeX = hipX + Math.sin(thighAngle) * GUY_THIGH_PX * facing;
-            const kneeY = hipY + Math.cos(thighAngle) * GUY_THIGH_PX;
-            const ankleX = kneeX + Math.sin(shinAngle) * GUY_SHIN_PX * facing;
-            const ankleY = kneeY + Math.cos(shinAngle) * GUY_SHIN_PX;
-            const toeX = ankleX + GUY_FOOT_PX * facing;
-
-            ctx.strokeStyle = color;
-            ctx.beginPath();
-            ctx.moveTo(hipX, hipY);
-            ctx.lineTo(kneeX, kneeY);
-            ctx.lineTo(ankleX, ankleY);
-            ctx.lineTo(toeX, ankleY);
-            ctx.stroke();
-        }
-
-        // Body bar on top of the legs, in his four colours
-        const barColors = [colors.left, colors.top[0], colors.top[1], colors.right];
-        const segmentW = CELL_PIXEL_W / barColors.length;
-        barColors.forEach((color, i) => {
-            ctx.fillStyle = color;
-            ctx.fillRect(left + i * segmentW, bodyTop, segmentW, GUY_BODY_HEIGHT_PX);
-        });
-    }
-
-    // How far through his walk cycle the guy is, from 0 to 1, or null if
-    // he is standing still. A new walk starts a quarter of the way in, with
-    // his legs together and one about to lift, so he never snaps from
-    // standing straight to a wide stride.
-    function getGuyWalkPhase(maze, nowMs) {
-        const isWalking = nowMs - maze.guySlide.startMs < GUY_WALK_LINGER_MS;
-        if (!isWalking) {
-            return null;
-        }
-        const cycles = (nowMs - maze.guySlide.walkStartMs) / GUY_WALK_CYCLE_MS;
-        return (cycles + 0.25) % 1;
-    }
-
-    // Just the outline of a guy's shape, with nothing filled in, so
-    // whatever is behind him shows through
-    function drawGuyOutline(x, y, color) {
-        const left = Math.round(x * PIXEL_RES);
-        const top = Math.round(y * PIXEL_RES);
-
-        // Corners of the guy's shape (left leg, top bar, right leg) in
-        // pixel-grid squares, traced clockwise from the top-left
+        // Corners of the shape (left leg, top bar, right leg) in blocks,
+        // traced clockwise from the top-left
         const corners = [[0, 0], [4, 0], [4, 3], [3, 3], [3, 1], [1, 1], [1, 3], [0, 3]];
 
         ctx.strokeStyle = color;
-        ctx.lineWidth = RETURNING_ENEMY_OUTLINE_WIDTH_PX;
+        ctx.lineWidth = MAP_OUTLINE_WIDTH_PX;
         ctx.beginPath();
         for (const [cornerX, cornerY] of corners) {
-            ctx.lineTo(left + cornerX * PIXEL_RES, top + cornerY * PIXEL_RES);
+            ctx.lineTo(left + cornerX * block, top + cornerY * block);
         }
         ctx.closePath();
         ctx.stroke();
     }
 
-    function drawLevelInfo(nowMs) {
-        const dotsLeft = mazes.reduce((total, maze) => total + maze.dots.size + maze.powerPellets.size, 0);
-        // With several mazes each power countdown says which maze it is for
-        let mazeNames = ["Power"];
-        if (mazes.length > 1) {
-            mazeNames = ["Left power", "Right power"];
+    function drawStatusBar(nowMs) {
+        ctx.fillStyle = HUD_BACKGROUND_COLOR;
+        ctx.fillRect(0, VIEW_H, VIEW_W, HUD_HEIGHT_PX);
+
+        const dotsLeft = maze.dots.size + maze.powerPellets.size;
+        const parts = [`SCORE ${score}`, `LEVEL ${level}`, `DOTS ${dotsLeft}`];
+        if (nowMs < maze.frightenedUntilMs) {
+            parts.push(`POWER ${Math.ceil((maze.frightenedUntilMs - nowMs) / 1000)}`);
         }
-        const powerTexts = mazes
-            .map((maze, i) => [maze, mazeNames[i]])
-            .filter(([maze]) => nowMs < maze.frightenedUntilMs)
-            .map(([maze, name]) => `${name}: ${Math.ceil((maze.frightenedUntilMs - nowMs) / 1000)}s`);
 
         ctx.fillStyle = HUD_TEXT_COLOR;
         ctx.textAlign = "left";
-        ctx.font = "18px sans-serif";
-        const text = [`Score: ${score}`, `Level ${level}`, `Dots left: ${dotsLeft}`, ...powerTexts].join("    ");
-        ctx.fillText(text, 4, MAZE_PIXEL_H + 24);
-        ctx.font = "14px sans-serif";
-        ctx.fillText("Arrows: move    Space: shoot", 4, MAZE_PIXEL_H + 46);
+        ctx.font = "bold 20px monospace";
+        ctx.fillText(parts.join("    "), 14, VIEW_H + 24);
+        ctx.font = "13px monospace";
+        ctx.fillText("Up/Down or W/S: walk    Left/Right: quarter turn    A/D: step sideways    Space: shoot",
+            14, VIEW_H + 45);
     }
 
     function drawDeathMessage() {
-        const totalW = MAZE_COUNT * MAZE_PIXEL_W + (MAZE_COUNT - 1) * MAZE_GAP_PX;
-
-        ctx.fillStyle = "rgba(0, 0, 0, 0.6)";
-        ctx.fillRect(0, 0, totalW, MAZE_PIXEL_H);
+        ctx.fillStyle = "rgba(90, 0, 0, 0.55)";
+        ctx.fillRect(0, 0, VIEW_W, VIEW_H);
 
         ctx.fillStyle = "#fff";
         ctx.textAlign = "center";
         ctx.font = "bold 48px sans-serif";
-        ctx.fillText("You died", totalW / 2, MAZE_PIXEL_H / 2);
+        ctx.fillText("You died", VIEW_W / 2, VIEW_H / 2);
         ctx.font = "20px sans-serif";
-        ctx.fillText("Press Space to play again", totalW / 2, MAZE_PIXEL_H / 2 + 40);
+        ctx.fillText("Press Space to play again", VIEW_W / 2, VIEW_H / 2 + 40);
     }
 </script>
 
