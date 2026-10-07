@@ -67,8 +67,9 @@
     // pressed mid-step waits until he reaches the middle of the next square.
     const GUY_TURN_MS = 600;
 
-    // Walking waits until a turn's swing is this far through, so he never
-    // walks one way while the view still points another
+    // After a turn from standing still, walking waits until the swing is
+    // this far through, so he never sets off one way while the view still
+    // points another. Turns taken on the move don't hold him up.
     const GUY_TURN_WALK_SHARE = 0.5;
     const TURN_KEYS = { ArrowLeft: -1, ArrowRight: 1 };
 
@@ -172,21 +173,28 @@
     const WALK_BOB_LINGER_MS = 150;
 
     // The guy holds a toy bubble blaster in the lower right of the view,
-    // angled in toward the crosshair. It is a small 3D model built from
-    // boxes, cylinders and spheres, drawn in perspective with glossy
-    // plastic lighting. A bubble swells at the nozzle as it gets ready to
-    // fire again (full size means ready); firing kicks the blaster back
-    // and a pop ring spreads from the nozzle. Each shot is a floating
-    // bubble that starts BUBBLE_START_AHEAD_SQUARES in front of the guy.
+    // angled in toward the crosshair: see-through blue plastic, like a
+    // dollar-store bubble gun. It is a small 3D model built from boxes,
+    // tubes and balls, drawn in perspective with glossy lighting; its
+    // inside walls show through the outside ones. A bubble swells at the
+    // nozzle as it gets ready to fire again (full size means ready); firing
+    // kicks the blaster back and a pop ring spreads from the nozzle. Each
+    // shot is a floating bubble that starts BUBBLE_START_AHEAD_SQUARES in
+    // front of the guy.
     //
     // Model sizes are in blaster units, x to the right, y down, z away from
-    // the eye; the barrel points along +z.
-    const BLASTER_BODY_RGB = [255, 64, 64];
-    const BLASTER_GRIP_RGB = [214, 42, 42];
-    const BLASTER_BARREL_RGB = [52, 200, 92];
-    const BLASTER_RING_RGB = [255, 160, 32];
-    const BLASTER_TANK_RGB = [80, 170, 255];
-    const BLASTER_TANK_ALPHA = 0.85;
+    // the eye; the barrel points along +z. Each part has a colour and how
+    // solid it looks (1 is fully solid).
+    const BLASTER_BODY_RGB = [110, 190, 255];
+    const BLASTER_BODY_ALPHA = 0.5;
+    const BLASTER_GRIP_RGB = [80, 160, 245];
+    const BLASTER_GRIP_ALPHA = 0.55;
+    const BLASTER_BARREL_RGB = [70, 150, 255];
+    const BLASTER_BARREL_ALPHA = 0.55;
+    const BLASTER_RING_RGB = [210, 235, 255];
+    const BLASTER_RING_ALPHA = 0.75;
+    const BLASTER_TANK_RGB = [40, 120, 255];
+    const BLASTER_TANK_ALPHA = 0.8;
     const BLASTER_NOZZLE_TIP_Z = 0.7;
     const NOZZLE_BUBBLE_MAX_RADIUS = 0.075;
 
@@ -260,6 +268,11 @@
 
     const HUD_HEIGHT_PX = 56;
 
+    // When an enemy catches the guy the view floods with its colour, up to
+    // DEATH_MAX_ALPHA solid, over DEATH_FADE_MS
+    const DEATH_FADE_MS = 500;
+    const DEATH_MAX_ALPHA = 0.88;
+
     // The whole game (view plus status bar) is laid out at GAME_W by GAME_H
     // and scaled up or down to fill the window, keeping its shape and
     // centred, with black borders where the window's shape differs. It is
@@ -280,6 +293,10 @@
     let score = 0;
     let isDead = false;
 
+    // Colour of the enemy that caught the guy, and when, for the death screen
+    let deathColor = "#ff2020";
+    let deathMs = -Infinity;
+
     // The maze for this level, holding:
     //   walls, dots,
     //   powerPellets        Sets of "x,y" keys of squares
@@ -293,6 +310,8 @@
     //                         kept unwrapped so turns swing the short way)
     //     turnFromAngle,      the view swings from turnFromAngle to angle,
     //     turnStartMs         starting at turnStartMs
+    //     isTurnWhileWalking  whether his latest turn was taken on the move
+    //                         (then it doesn't hold up his walking)
     //     queuedTurn          a turn (1 right, -1 left, 0 none) pressed
     //                         mid-step, waiting for him to reach a square
     //   enemies             [x, y] squares
@@ -337,17 +356,12 @@
             return;
         }
         // One quarter turn per press; holding the key doesn't keep spinning.
-        // He turns now if he is standing in a square, or as soon as he
-        // reaches the middle of the square he is stepping into.
+        // The turn waits until he is in the middle of a square, which the
+        // guy's clock checks every few milliseconds; see stepGuy.
         if (event.key in TURN_KEYS) {
             event.preventDefault();
             if (!event.repeat && !isDead) {
-                const nowMs = performance.now();
-                let guy = { ...maze.guy, queuedTurn: TURN_KEYS[event.key] };
-                if (!isGuyMidStep(guy, nowMs)) {
-                    guy = turnGuy(maze.guy, TURN_KEYS[event.key], nowMs);
-                }
-                maze = { ...maze, guy };
+                maze = { ...maze, guy: { ...maze.guy, queuedTurn: TURN_KEYS[event.key] } };
             }
             return;
         }
@@ -411,6 +425,7 @@
                 angle: startAngle,
                 turnFromAngle: startAngle,
                 turnStartMs: -Infinity,
+                isTurnWhileWalking: false,
                 queuedTurn: 0,
             },
             enemies,
@@ -456,6 +471,19 @@
         }
 
         let current = maze;
+
+        // A turn pressed mid-step, toward a way that is open at the square
+        // he is stepping into, starts swinging the view straight away. He
+        // arrives already part way round and walks on without stopping, as
+        // if cutting the corner.
+        const { guy } = current;
+        if (isGuyMidStep(guy, nowMs) && guy.queuedTurn !== 0) {
+            const [sideX, sideY] = getTurnSide(guy, guy.queuedTurn);
+            if (getStepDestination(current.walls, guy.squareX, guy.squareY, sideX, sideY) !== null) {
+                current = { ...current, guy: turnGuy(guy, guy.queuedTurn, nowMs, true) };
+            }
+        }
+
         if (!isGuyMidStep(current.guy, nowMs)) {
             const meal = eatAtGuy(current, nowMs);
             current = meal.maze;
@@ -466,19 +494,53 @@
                 return;
             }
 
-            let guy = current.guy;
-            if (guy.queuedTurn !== 0) {
-                guy = turnGuy(guy, guy.queuedTurn, nowMs);
-            }
-            current = { ...current, guy: startNextStep(current.walls, guy, getControls(), nowMs) };
+            current = { ...current, guy: moveGuyOnFromSquare(current.walls, current.guy, nowMs) };
         }
 
         const collision = resolveCollisions(current, nowMs);
         maze = collision.maze;
         score += collision.points;
         if (collision.isCaught) {
-            isDead = true;
+            dieToEnemy(collision.catcherIndex, nowMs);
         }
+    }
+
+    // What the guy does next while standing in the middle of a square. A
+    // waiting turn is taken here if that way is open, or if no opening is
+    // close by. But if that way is a wall here and opens up one square
+    // ahead, he is being helped round a corner: he sets off on that one
+    // square and his view starts turning at the same moment, so he reaches
+    // the corner already part way round and carries on into the side
+    // passage in one smooth movement. Otherwise he takes his next step if a
+    // walking key is held.
+    function moveGuyOnFromSquare(walls, guy, nowMs) {
+        if (guy.queuedTurn === 0) {
+            return startNextStep(walls, guy, getControls(), nowMs);
+        }
+
+        const faceX = Math.round(Math.cos(guy.angle));
+        const faceY = Math.round(Math.sin(guy.angle));
+        const [sideX, sideY] = getTurnSide(guy, guy.queuedTurn);
+
+        const isSideOpenHere = getStepDestination(walls, guy.squareX, guy.squareY, sideX, sideY) !== null;
+        const ahead = getStepDestination(walls, guy.squareX, guy.squareY, faceX, faceY);
+        const isSideOpenAhead = ahead !== null && getStepDestination(walls, ahead[0], ahead[1], sideX, sideY) !== null;
+        if (!isSideOpenHere && isSideOpenAhead) {
+            const steppingAhead = startNextStep(walls, guy, { forward: 1, strafe: 0 }, nowMs);
+            return turnGuy(steppingAhead, guy.queuedTurn, nowMs, true);
+        }
+
+        // He is still on the move if his last step only just finished
+        const isArrivingFromStep = nowMs - (guy.stepStartMs + GUY_STEP_MS) < 2 * GUY_UPDATE_INTERVAL_MS;
+        return startNextStep(walls, turnGuy(guy, guy.queuedTurn, nowMs, isArrivingFromStep), getControls(), nowMs);
+    }
+
+    // The way the guy would face after a turn, as a grid step: to the right
+    // of his facing for a right turn (1), to the left for a left turn (-1)
+    function getTurnSide(guy, turn) {
+        const faceX = Math.round(Math.cos(guy.angle));
+        const faceY = Math.round(Math.sin(guy.angle));
+        return [-faceY * turn, faceX * turn];
     }
 
     function isGuyMidStep(guy, nowMs) {
@@ -491,7 +553,9 @@
     // Otherwise he stays as he is. A step that follows straight on from the
     // last one starts exactly when it ended, so his speed stays steady.
     function startNextStep(walls, guy, { forward, strafe }, nowMs) {
-        if (getSlideProgress(guy.turnStartMs, GUY_TURN_MS, nowMs) < GUY_TURN_WALK_SHARE) {
+        const isTurnHoldingUp = !guy.isTurnWhileWalking
+            && getSlideProgress(guy.turnStartMs, GUY_TURN_MS, nowMs) < GUY_TURN_WALK_SHARE;
+        if (isTurnHoldingUp) {
             return guy;
         }
 
@@ -564,13 +628,17 @@
 
     // The guy a quarter turn to the right (direction 1) or left (-1), with
     // no turn left waiting. The view swings round from wherever it is right
-    // now, so a second press mid-swing carries on smoothly.
-    function turnGuy(guy, direction, nowMs) {
+    // now, so a second press mid-swing carries on smoothly. isWhileWalking
+    // marks a turn taken on the move, which never holds up his walking;
+    // a turn from standing still makes walking wait for the view to swing
+    // part way round first.
+    function turnGuy(guy, direction, nowMs, isWhileWalking) {
         return {
             ...guy,
             angle: guy.angle + (direction * Math.PI) / 2,
             turnFromAngle: getGuyViewAngle(guy, nowMs),
             turnStartMs: nowMs,
+            isTurnWhileWalking: isWhileWalking,
             queuedTurn: 0,
         };
     }
@@ -622,7 +690,7 @@
         maze = collision.maze;
         score += collision.points;
         if (collision.isCaught) {
-            isDead = true;
+            dieToEnemy(collision.catcherIndex, nowMs);
         }
     }
 
@@ -786,10 +854,18 @@
                 updated = sendEnemyHome(updated, i);
                 continue;
             }
-            return { maze: updated, points, isCaught: true };
+            return { maze: updated, points, isCaught: true, catcherIndex: i };
         }
 
-        return { maze: updated, points, isCaught: false };
+        return { maze: updated, points, isCaught: false, catcherIndex: null };
+    }
+
+    // The guy is caught: the game stops, and the screen will flood with the
+    // colour of the enemy that got him
+    function dieToEnemy(catcherIndex, nowMs) {
+        isDead = true;
+        deathColor = ENEMY_BODY_COLORS[catcherIndex % ENEMY_BODY_COLORS.length];
+        deathMs = nowMs;
     }
 
     // The maze with this enemy no longer frightened and walking back to
@@ -1360,7 +1436,7 @@
         drawStatusBar(nowMs);
 
         if (isDead) {
-            drawDeathMessage();
+            drawDeathMessage(nowMs);
         }
 
         ctx.restore();
@@ -1745,11 +1821,20 @@
                     }
                     return { points, center, normal };
                 })
-                .filter(({ center, normal }) => dotProduct(normal, center) < 0)
-                .map(({ points, center, normal }) => ({
-                    depth: center[2],
-                    draw: () => drawShadedFace(points, getLitColor(part.rgb, normal, center)),
-                }));
+                // Faces turned away are hidden on solid parts, but on
+                // see-through parts they are the inside walls showing through
+                .filter(({ center, normal }) => dotProduct(normal, center) < 0 || part.alpha < 1)
+                .map(({ points, center, normal }) => {
+                    // An inside wall is lit from the side facing the eye
+                    let litNormal = normal;
+                    if (dotProduct(normal, center) > 0) {
+                        litNormal = normal.map((value) => -value);
+                    }
+                    return {
+                        depth: center[2],
+                        draw: () => drawShadedFace(points, getLitColor(part.rgb, litNormal, center), part.alpha),
+                    };
+                });
         });
 
         drawables.sort((a, b) => b.depth - a.depth);
@@ -1760,12 +1845,12 @@
         drawNozzleBubble(placement, nowMs);
     }
 
-    // One flat face of the blaster, with a hairline of the same colour to
-    // hide the seams between neighbouring faces
-    function drawShadedFace(points, color) {
+    // One flat face of the blaster, as solid as alpha says. Solid faces get
+    // a hairline of the same colour to hide the seams between neighbours;
+    // see-through faces don't, or the doubled-up edges would show as lines.
+    function drawShadedFace(points, color, alpha) {
+        ctx.globalAlpha = alpha;
         ctx.fillStyle = color;
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 1;
         ctx.beginPath();
         for (const point of points) {
             const [x, y] = projectBlasterPoint(point);
@@ -1773,7 +1858,12 @@
         }
         ctx.closePath();
         ctx.fill();
-        ctx.stroke();
+        if (alpha === 1) {
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 1;
+            ctx.stroke();
+        }
+        ctx.globalAlpha = 1;
     }
 
     // A ball seen in front of the eye: a disc shaded smoothly from a glossy
@@ -1893,15 +1983,15 @@
     function getBlasterParts() {
         if (blasterParts === null) {
             blasterParts = [
-                createBoxPart([0, 0.17, -0.04], [0.1, 0.24, 0.11], BLASTER_GRIP_RGB),
-                createCylinderPart(0.06, 0.09, -0.17, -0.12, BLASTER_BODY_RGB),
-                createCylinderPart(0.09, 0.1, -0.12, -0.08, BLASTER_BODY_RGB),
-                createCylinderPart(0.1, 0.1, -0.08, 0.2, BLASTER_BODY_RGB),
-                createCylinderPart(0.106, 0.1, 0.2, 0.24, BLASTER_RING_RGB),
-                createCylinderPart(0.05, 0.05, 0.24, 0.62, BLASTER_BARREL_RGB),
-                createCylinderPart(0.064, 0.064, 0.34, 0.39, BLASTER_RING_RGB),
-                createCylinderPart(0.066, 0.066, 0.5, 0.55, BLASTER_RING_RGB),
-                createCylinderPart(0.055, 0.085, 0.6, BLASTER_NOZZLE_TIP_Z, BLASTER_RING_RGB),
+                createBoxPart([0, 0.17, -0.04], [0.1, 0.24, 0.11], BLASTER_GRIP_RGB, BLASTER_GRIP_ALPHA),
+                createCylinderPart(0.06, 0.09, -0.17, -0.12, BLASTER_BODY_RGB, BLASTER_BODY_ALPHA),
+                createCylinderPart(0.09, 0.1, -0.12, -0.08, BLASTER_BODY_RGB, BLASTER_BODY_ALPHA),
+                createCylinderPart(0.1, 0.1, -0.08, 0.2, BLASTER_BODY_RGB, BLASTER_BODY_ALPHA),
+                createCylinderPart(0.106, 0.1, 0.2, 0.24, BLASTER_RING_RGB, BLASTER_RING_ALPHA),
+                createCylinderPart(0.05, 0.05, 0.24, 0.62, BLASTER_BARREL_RGB, BLASTER_BARREL_ALPHA),
+                createCylinderPart(0.064, 0.064, 0.34, 0.39, BLASTER_RING_RGB, BLASTER_RING_ALPHA),
+                createCylinderPart(0.066, 0.066, 0.5, 0.55, BLASTER_RING_RGB, BLASTER_RING_ALPHA),
+                createCylinderPart(0.055, 0.085, 0.6, BLASTER_NOZZLE_TIP_Z, BLASTER_RING_RGB, BLASTER_RING_ALPHA),
                 { center: [0, -0.13, -0.02], radius: 0.065, rgb: BLASTER_TANK_RGB, alpha: BLASTER_TANK_ALPHA },
             ];
         }
@@ -1909,7 +1999,7 @@
     }
 
     // A box with the given middle and size, as six faces
-    function createBoxPart(center, size, rgb) {
+    function createBoxPart(center, size, rgb, alpha) {
         const [half0, half1, half2] = size.map((length) => length / 2);
         const corner = (signX, signY, signZ) => [
             center[0] + signX * half0,
@@ -1924,12 +2014,12 @@
             [corner(-1, -1, -1), corner(1, -1, -1), corner(1, 1, -1), corner(-1, 1, -1)],
             [corner(-1, -1, 1), corner(-1, 1, 1), corner(1, 1, 1), corner(1, -1, 1)],
         ];
-        return { faces, rgb, alpha: 1, center };
+        return { faces, rgb, alpha, center };
     }
 
     // A tube along the barrel line from zStart to zEnd, its radius going
     // from radiusStart to radiusEnd (so it can flare), with both ends capped
-    function createCylinderPart(radiusStart, radiusEnd, zStart, zEnd, rgb) {
+    function createCylinderPart(radiusStart, radiusEnd, zStart, zEnd, rgb, alpha) {
         const ringPoint = (radius, z, i) => {
             const angle = (2 * Math.PI * i) / BLASTER_CYLINDER_SEGMENTS;
             return [radius * Math.cos(angle), radius * Math.sin(angle), z];
@@ -1943,7 +2033,7 @@
         ]);
         const startCap = indexes.map((i) => ringPoint(radiusStart, zStart, i));
         const endCap = indexes.map((i) => ringPoint(radiusEnd, zEnd, i));
-        return { faces: [...sides, startCap, endCap], rgb, alpha: 1, center: [0, 0, (zStart + zEnd) / 2] };
+        return { faces: [...sides, startCap, endCap], rgb, alpha, center: [0, 0, (zStart + zEnd) / 2] };
     }
 
     // A polygon's facing direction (not yet unit length), worked out from
@@ -2197,15 +2287,27 @@
             14, VIEW_H + 45);
     }
 
-    function drawDeathMessage() {
-        ctx.fillStyle = "rgba(90, 0, 0, 0.55)";
+    // The view floods with the colour of the enemy that caught the guy,
+    // filling in over DEATH_FADE_MS, with the message on top in white
+    // edged in black so it reads on any colour
+    function drawDeathMessage(nowMs) {
+        const fill = clamp((nowMs - deathMs) / DEATH_FADE_MS, 0, 1);
+        ctx.globalAlpha = DEATH_MAX_ALPHA * fill;
+        ctx.fillStyle = deathColor;
         ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+        ctx.globalAlpha = 1;
 
-        ctx.fillStyle = "#fff";
         ctx.textAlign = "center";
+        ctx.lineJoin = "round";
+        ctx.strokeStyle = "rgba(0, 0, 0, 0.8)";
+        ctx.fillStyle = "#fff";
         ctx.font = "bold 48px sans-serif";
+        ctx.lineWidth = 6;
+        ctx.strokeText("You died", VIEW_W / 2, VIEW_H / 2);
         ctx.fillText("You died", VIEW_W / 2, VIEW_H / 2);
-        ctx.font = "20px sans-serif";
+        ctx.font = "bold 20px sans-serif";
+        ctx.lineWidth = 4;
+        ctx.strokeText("Press Space to play again", VIEW_W / 2, VIEW_H / 2 + 40);
         ctx.fillText("Press Space to play again", VIEW_W / 2, VIEW_H / 2 + 40);
     }
 </script>
