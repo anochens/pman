@@ -30,18 +30,26 @@
 <script>
     // ---- The world ----
 
-    // The maze, in squares. It is built on a lattice, so both sizes must
-    // be odd. Walls fill whole squares.
-    const WORLD_COLS = 15;
-    const WORLD_ROWS = 19;
+    // Each level's maze size in squares, and how many enemies it has. Level
+    // 1 is a small maze with one enemy; each next level is bigger with one
+    // more enemy; levels past the end of the list repeat its last entry.
+    // Mazes are built on a lattice, and the guy's start (bottom middle) and
+    // the side tunnel (middle row) must land on open rooms, so both sizes
+    // must be 3 more than a multiple of 4.
+    const LEVEL_LAYOUTS = [
+        { cols: 11, rows: 11, enemyCount: 1 },
+        { cols: 15, rows: 15, enemyCount: 2 },
+        { cols: 19, rows: 19, enemyCount: 3 },
+    ];
 
-    // On this row the left and right border walls have a gap. Walking off
-    // one edge brings you in at the other. Must be an odd row.
-    const TUNNEL_ROW = Math.floor(WORLD_ROWS / 2);
-
-    // The guy starts in the bottom middle square, facing down the longest
-    // open corridor from there, so walking forward always gets him going
-    const GUY_START_SQUARE = [Math.floor(WORLD_COLS / 2), WORLD_ROWS - 2];
+    // The current level's maze size, the row with the side tunnel (walking
+    // off one edge brings you in at the other), and the guy's start square:
+    // bottom middle, facing down the longest open corridor from there, so
+    // walking forward always gets him going. Set by startLevel.
+    let worldCols = LEVEL_LAYOUTS[0].cols;
+    let worldRows = LEVEL_LAYOUTS[0].rows;
+    let tunnelRow = Math.floor(worldRows / 2);
+    let guyStartSquare = [Math.floor(worldCols / 2), worldRows - 2];
 
     const STEP_DIRECTIONS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
 
@@ -117,15 +125,11 @@
 
     // ---- Enemies ----
 
-    // On level 1 enemies step one square this often. Each later level they
-    // move this many times faster than the level before.
+    // Enemies step one square this often while the mazes are still growing.
+    // From the first level after the last layout, they move this many times
+    // faster each level than the level before.
     const LEVEL_1_ENEMY_STEP_INTERVAL_MS = 1000;
     const ENEMY_SPEEDUP_PER_LEVEL = 1.05;
-    const ENEMY_COUNT = 3;
-
-    // Enemies start at least this many squares from the guy, counted
-    // straight across the grid ignoring walls
-    const ENEMY_MIN_START_GRID_DISTANCE = WORLD_ROWS / 2;
 
     // An enemy catches the guy (or, frightened, gets eaten) once its middle
     // is this close to his
@@ -650,7 +654,12 @@
     // so the enemies' first step is a full interval in
     function startLevel() {
         isDead = false;
-        maze = createMaze();
+        const layout = getLevelLayout(level);
+        worldCols = layout.cols;
+        worldRows = layout.rows;
+        tunnelRow = Math.floor(worldRows / 2);
+        guyStartSquare = [Math.floor(worldCols / 2), worldRows - 2];
+        maze = createMaze(layout.enemyCount);
         touchStepWaiting = 0;
 
         enemyTickCount = 0;
@@ -659,23 +668,23 @@
     }
 
     // A new maze for the current level: walls, dots, power pellets, and
-    // the guy and enemies at their start squares
-    function createMaze() {
-        const walls = buildValidWalls(GUY_START_SQUARE);
-        const dotRuns = placeDotRuns(walls, GUY_START_SQUARE);
-        const { dots, powerPellets } = placePowerPellets(walls, dotRuns, GUY_START_SQUARE);
-        const enemies = getEnemyStartSquares(walls, GUY_START_SQUARE, ENEMY_COUNT);
-        const startAngle = getLongestCorridorAngle(walls, GUY_START_SQUARE);
+    // the guy and enemyCount enemies at their start squares
+    function createMaze(enemyCount) {
+        const walls = buildValidWalls(guyStartSquare);
+        const dotRuns = placeDotRuns(walls, guyStartSquare);
+        const { dots, powerPellets } = placePowerPellets(walls, dotRuns, guyStartSquare);
+        const enemies = getEnemyStartSquares(walls, guyStartSquare, enemyCount);
+        const startAngle = getLongestCorridorAngle(walls, guyStartSquare);
 
         return {
             walls,
             dots,
             powerPellets,
             guy: {
-                squareX: GUY_START_SQUARE[0],
-                squareY: GUY_START_SQUARE[1],
-                fromX: GUY_START_SQUARE[0] + 0.5,
-                fromY: GUY_START_SQUARE[1] + 0.5,
+                squareX: guyStartSquare[0],
+                squareY: guyStartSquare[1],
+                fromX: guyStartSquare[0] + 0.5,
+                fromY: guyStartSquare[1] + 0.5,
                 stepStartMs: -Infinity,
                 stepCount: 0,
                 angle: startAngle,
@@ -702,7 +711,7 @@
             let [x, y] = [squareX, squareY];
             let length = 0;
             let next = getStepDestination(walls, x, y, dx, dy);
-            while (next !== null && length < WORLD_COLS + WORLD_ROWS) {
+            while (next !== null && length < worldCols + worldRows) {
                 [x, y] = next;
                 length++;
                 next = getStepDestination(walls, x, y, dx, dy);
@@ -858,7 +867,7 @@
         const toX = guy.squareX + 0.5;
         const toY = guy.squareY + 0.5;
         const x = guy.fromX + getWrappedDeltaX(guy.fromX, toX) * t;
-        return { x: (x + WORLD_COLS) % WORLD_COLS, y: guy.fromY + (toY - guy.fromY) * t };
+        return { x: (x + worldCols) % worldCols, y: guy.fromY + (toY - guy.fromY) * t };
     }
 
     // How many squares the guy has walked this level, counting part of a
@@ -922,10 +931,10 @@
     // True if the square is a wall. Above and below the maze counts as wall;
     // left and right wrap round, as through the tunnel.
     function isWallAt(walls, squareX, squareY) {
-        if (squareY < 0 || squareY >= WORLD_ROWS) {
+        if (squareY < 0 || squareY >= worldRows) {
             return true;
         }
-        const wrappedX = ((squareX % WORLD_COLS) + WORLD_COLS) % WORLD_COLS;
+        const wrappedX = ((squareX % worldCols) + worldCols) % worldCols;
         return walls.has(wallKey(wrappedX, squareY));
     }
 
@@ -933,11 +942,11 @@
     // tunnel joining the left and right edges
     function getWrappedDeltaX(x1, x2) {
         let delta = x2 - x1;
-        if (delta > WORLD_COLS / 2) {
-            delta -= WORLD_COLS;
+        if (delta > worldCols / 2) {
+            delta -= worldCols;
         }
-        if (delta < -WORLD_COLS / 2) {
-            delta += WORLD_COLS;
+        if (delta < -worldCols / 2) {
+            delta += worldCols;
         }
         return delta;
     }
@@ -961,8 +970,16 @@
         }
     }
 
+    // Steady while the mazes grow, then faster every level after that
     function getEnemyStepIntervalMs() {
-        return LEVEL_1_ENEMY_STEP_INTERVAL_MS / ENEMY_SPEEDUP_PER_LEVEL ** (level - 1);
+        const speedups = Math.max(0, level - LEVEL_LAYOUTS.length);
+        return LEVEL_1_ENEMY_STEP_INTERVAL_MS / ENEMY_SPEEDUP_PER_LEVEL ** speedups;
+    }
+
+    // The maze size and enemy count for a level; past the end of the list,
+    // its last entry
+    function getLevelLayout(levelNumber) {
+        return LEVEL_LAYOUTS[Math.min(levelNumber, LEVEL_LAYOUTS.length) - 1];
     }
 
     // Sizes the canvas to the window in real screen pixels (so it stays sharp
@@ -1009,7 +1026,7 @@
         const faceX = Math.round(Math.cos(maze.guy.angle));
         const faceY = Math.round(Math.sin(maze.guy.angle));
         const bullet = {
-            x: (x + faceX * BUBBLE_START_AHEAD_SQUARES + WORLD_COLS) % WORLD_COLS,
+            x: (x + faceX * BUBBLE_START_AHEAD_SQUARES + worldCols) % worldCols,
             y: y + faceY * BUBBLE_START_AHEAD_SQUARES,
             vx: faceX * BULLET_SPEED_SQUARES_PER_MS,
             vy: faceY * BULLET_SPEED_SQUARES_PER_MS,
@@ -1048,7 +1065,7 @@
             let isGone = false;
 
             for (let step = 0; step < stepCount && !isGone; step++) {
-                x = (x + bullet.vx * stepMs + WORLD_COLS) % WORLD_COLS;
+                x = (x + bullet.vx * stepMs + worldCols) % worldCols;
                 y += bullet.vy * stepMs;
                 if (isWallAt(updated.walls, Math.floor(x), Math.floor(y))) {
                     isGone = true;
@@ -1164,9 +1181,9 @@
         ]);
         const corners = [
             [1, 1],
-            [WORLD_COLS - 2, 1],
-            [1, WORLD_ROWS - 2],
-            [WORLD_COLS - 2, WORLD_ROWS - 2],
+            [worldCols - 2, 1],
+            [1, worldRows - 2],
+            [worldCols - 2, worldRows - 2],
         ];
         const freeCorners = corners
             .filter(([x, y]) => !otherEnemyKeys.has(wallKey(x, y)))
@@ -1306,9 +1323,9 @@
     // if a wall or the top/bottom edge is in the way. Stepping off the left
     // or right edge comes back in on the other side.
     function getStepDestination(walls, x, y, dx, dy) {
-        const nextX = (x + dx + WORLD_COLS) % WORLD_COLS;
+        const nextX = (x + dx + worldCols) % worldCols;
         const nextY = y + dy;
-        if (nextY < 0 || nextY >= WORLD_ROWS || walls.has(wallKey(nextX, nextY))) {
+        if (nextY < 0 || nextY >= worldRows || walls.has(wallKey(nextX, nextY))) {
             return null;
         }
         return [nextX, nextY];
@@ -1366,10 +1383,10 @@
         const walls = new Set();
 
         // Start with every non-room square walled, except the tunnel ends
-        for (let x = 0; x < WORLD_COLS; x++) {
-            for (let y = 0; y < WORLD_ROWS; y++) {
+        for (let x = 0; x < worldCols; x++) {
+            for (let y = 0; y < worldRows; y++) {
                 const isRoom = x % 2 === 1 && y % 2 === 1;
-                const isTunnelEnd = y === TUNNEL_ROW && (x === 0 || x === WORLD_COLS - 1);
+                const isTunnelEnd = y === tunnelRow && (x === 0 || x === worldCols - 1);
                 if (!isRoom && !isTunnelEnd) {
                     walls.add(wallKey(x, y));
                 }
@@ -1395,8 +1412,8 @@
 
         // Give every dead-end room a second way out, then knock out a few
         // more walls at random so the maze has plenty of loops
-        for (let x = 1; x < WORLD_COLS; x += 2) {
-            for (let y = 1; y < WORLD_ROWS; y += 2) {
+        for (let x = 1; x < worldCols; x += 2) {
+            for (let y = 1; y < worldRows; y += 2) {
                 const exitCount = STEP_DIRECTIONS
                     .filter(([dx, dy]) => getStepDestination(walls, x, y, dx, dy) !== null)
                     .length;
@@ -1431,7 +1448,7 @@
         return STEP_DIRECTIONS
             .map(([dx, dy]) => [x + dx * 2, y + dy * 2])
             .filter(([roomX, roomY]) => roomX > 0 && roomY > 0
-                && roomX < WORLD_COLS - 1 && roomY < WORLD_ROWS - 1);
+                && roomX < worldCols - 1 && roomY < worldRows - 1);
     }
 
     // True if removing this wall leaves every wall beside it still touching
@@ -1456,8 +1473,8 @@
     // each way, or null if the maze has none
     function findOversizedOpenArea(walls) {
         const size = OPEN_AREA_MAX_SIZE + 1;
-        for (let x = 0; x + size <= WORLD_COLS; x++) {
-            for (let y = 0; y + size <= WORLD_ROWS; y++) {
+        for (let x = 0; x + size <= worldCols; x++) {
+            for (let y = 0; y + size <= worldRows; y++) {
                 if (isBlockOpen(walls, x, y, size)) {
                     return [x, y];
                 }
@@ -1480,8 +1497,8 @@
     // True if every open square has at least two ways out, so no corridor
     // ends in a pocket the guy could get trapped in
     function isFreeOfDeadEnds(walls) {
-        for (let x = 0; x < WORLD_COLS; x++) {
-            for (let y = 0; y < WORLD_ROWS; y++) {
+        for (let x = 0; x < worldCols; x++) {
+            for (let y = 0; y < worldRows; y++) {
                 if (walls.has(wallKey(x, y))) {
                     continue;
                 }
@@ -1497,7 +1514,7 @@
     }
 
     function isEveryOpenSquareReachable(walls, [guySqX, guySqY]) {
-        const openSquareCount = WORLD_COLS * WORLD_ROWS - walls.size;
+        const openSquareCount = worldCols * worldRows - walls.size;
         return getPathDistances(walls, guySqX, guySqY).size === openSquareCount;
     }
 
@@ -1592,8 +1609,8 @@
         const openSquares = [...getPathDistances(walls, guySqX, guySqY).keys()]
             .filter((key) => key !== guyKey)
             .map((key) => key.split(",").map(Number));
-        const halfCols = WORLD_COLS / 2;
-        const halfRows = WORLD_ROWS / 2;
+        const halfCols = worldCols / 2;
+        const halfRows = worldRows / 2;
         const quarters = [
             { isLeft: true, isTop: true },
             { isLeft: false, isTop: true },
@@ -1644,7 +1661,8 @@
             .filter(([key, distance]) => {
                 const [x, y] = key.split(",").map(Number);
                 const gridDistance = Math.abs(x - guySqX) + Math.abs(y - guySqY);
-                return distance >= maxDistance / 2 && gridDistance >= ENEMY_MIN_START_GRID_DISTANCE;
+                // At least half the maze's height away across the grid
+                return distance >= maxDistance / 2 && gridDistance >= worldRows / 2;
             })
             .map(([key]) => key);
 
@@ -2481,8 +2499,8 @@
     // flashing when frightened, a faint outline when walking back), and the
     // guy as his four-colour shape with a wedge showing his facing.
     function drawMinimap(currentMaze, nowMs) {
-        const mapW = WORLD_COLS * MAP_CELL_W;
-        const mapH = WORLD_ROWS * MAP_CELL_H;
+        const mapW = worldCols * MAP_CELL_W;
+        const mapH = worldRows * MAP_CELL_H;
         const left = VIEW_W - MINIMAP_MARGIN_PX - mapW * MINIMAP_SCALE;
 
         ctx.save();
