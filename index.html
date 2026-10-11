@@ -9,7 +9,7 @@
             margin: 0;
             height: 100%;
             overflow: hidden;
-            background: #000;
+            background: #03060d;
             /* Swipes steer the guy, so they must not scroll, zoom or select */
             touch-action: none;
             overscroll-behavior: none;
@@ -192,23 +192,39 @@
     const MIN_LIGHT = 0.12;
     const MAX_RAY_STEPS = 80;
 
-    // Walls are stone bricks: BRICK_ROWS rows of bricks per wall, each brick
-    // 1 / BRICKS_PER_SQUARE of a square wide, with dark mortar between.
-    // Faces running north-south are drawn a little darker, as if lit from
-    // one side.
-    const WALL_BASE_RGB = [128, 112, 96];
-    const MORTAR_RGB = [40, 34, 30];
-    const BRICK_ROWS = 5;
-    const BRICKS_PER_SQUARE = 3;
-    const MORTAR_SHARE = 0.08;
-    const BRICK_SHADE_VARIATION = 0.18;
+    // Walls are code editor panels in Semgrep's navy and green: each wall
+    // face shows CODE_LINES_PER_WALL lines of made-up, syntax-coloured code,
+    // CODE_CHARS_PER_LINE characters wide, inside a thin green frame. Every
+    // line is a run of tokens (bars of colour) after an indent, and now and
+    // then a line is a finding, picked out with a red highlight. Faces
+    // running north-south are drawn a little darker, as if lit from one
+    // side.
+    const SEMGREP_GREEN_RGB = [42, 207, 166];
+    const WALL_BASE_RGB = [20, 32, 52];
+    const WALL_FRAME_RGB = SEMGREP_GREEN_RGB;
+    const WALL_FRAME_SHARE = 0.03;
+    const FINDING_LINE_RGB = [120, 30, 40];
+    const FINDING_LINE_CHANCE = 0.08;
+    const BLANK_LINE_CHANCE = 0.15;
+    const CODE_TOKEN_RGBS = [
+        SEMGREP_GREEN_RGB,
+        [97, 175, 239],
+        [190, 150, 255],
+        [247, 150, 70],
+        [210, 220, 235],
+        [110, 125, 150],
+    ];
+    const CODE_LINES_PER_WALL = 9;
+    const CODE_CHARS_PER_LINE = 24;
+    const CODE_MAX_INDENT_CHARS = 8;
+    const CODE_TOKEN_HEIGHT_SHARE = 0.45;
     const SIDE_WALL_SHADE = 0.72;
     const WALL_STRIP_OVERLAP_W = 1.05;
 
-    const CEILING_TOP_COLOR = "#05050a";
-    const CEILING_HORIZON_COLOR = "#1b1b26";
-    const FLOOR_HORIZON_COLOR = "#1d1712";
-    const FLOOR_NEAR_COLOR = "#4a3a2c";
+    const CEILING_TOP_COLOR = "#03060d";
+    const CEILING_HORIZON_COLOR = "#0d1a2c";
+    const FLOOR_HORIZON_COLOR = "#081322";
+    const FLOOR_NEAR_COLOR = "#16314a";
 
     // Heights of things above the floor, as a share of wall height
     const DOT_HEIGHT_SHARE = 0.18;
@@ -234,15 +250,15 @@
     // Model sizes are in blaster units, x to the right, y down, z away from
     // the eye; the barrel points along +z. Each part has a colour and how
     // solid it looks (1 is fully solid).
-    const BLASTER_BODY_RGB = [110, 190, 255];
+    const BLASTER_BODY_RGB = [90, 225, 190];
     const BLASTER_BODY_ALPHA = 0.5;
-    const BLASTER_GRIP_RGB = [80, 160, 245];
+    const BLASTER_GRIP_RGB = [42, 207, 166];
     const BLASTER_GRIP_ALPHA = 0.55;
-    const BLASTER_BARREL_RGB = [70, 150, 255];
+    const BLASTER_BARREL_RGB = [30, 190, 150];
     const BLASTER_BARREL_ALPHA = 0.55;
-    const BLASTER_RING_RGB = [210, 235, 255];
+    const BLASTER_RING_RGB = [215, 255, 240];
     const BLASTER_RING_ALPHA = 0.75;
-    const BLASTER_TANK_RGB = [40, 120, 255];
+    const BLASTER_TANK_RGB = [19, 150, 120];
     const BLASTER_TANK_ALPHA = 0.8;
     const BLASTER_NOZZLE_TIP_Z = 0.7;
 
@@ -272,8 +288,8 @@
     const BLASTER_KICK_BACK = 0.07;
     const BLASTER_KICK_PITCH_RADIANS = 0.14;
     const NOZZLE_POP_MS = 150;
-    const BUBBLE_FILL_COLOR = "rgba(150, 215, 255, 0.28)";
-    const BUBBLE_EDGE_COLOR = "rgba(225, 245, 255, 0.95)";
+    const BUBBLE_FILL_COLOR = "rgba(120, 235, 205, 0.28)";
+    const BUBBLE_EDGE_COLOR = "rgba(220, 255, 245, 0.95)";
     const BUBBLE_SHINE_COLOR = "rgba(255, 255, 255, 0.9)";
     const BUBBLE_START_AHEAD_SQUARES = 0.3;
 
@@ -285,7 +301,7 @@
     const BUBBLE_LAUNCH_MS = 200;
     const BUBBLE_LAUNCH_RADIUS = 0.045;
 
-    const DOT_COLOR = "#ffd700";
+    const DOT_COLOR = "#2acfa6";
 
     // Power pellets are swirled with the rainbow, turning once every
     // PELLET_SPIN_MS; the first colour is repeated at the end so the swirl
@@ -304,17 +320,19 @@
     const BLASTER_RING_SPIN_MS = 2000;
     const BLASTER_TUBE_SLICE_LENGTH = 0.03;
 
-    // Enemies are drawn as their blocky 4x3 shape, in a canvas this many
-    // pixels per block, then scaled into the view
+    // Enemies are bugs, drawn into a canvas 4 by 3 blocks of this many
+    // pixels, then scaled into the view
     const ENEMY_SPRITE_BLOCK_PX = 40;
+    const BUG_OUTLINE_COLOR = "rgba(0, 0, 0, 0.55)";
 
     // The bullseye on a frightened enemy: ring sizes in blocks from the
     // outside in, coloured in turn
     const TARGET_RING_RADII_BLOCKS = [1.05, 0.78, 0.5, 0.24];
     const TARGET_RING_COLORS = ["#e01e1e", "#ffffff"];
 
-    // Each enemy is one solid colour, in this order
-    const ENEMY_BODY_COLORS = ["#ff2020", "#ff8cdc", "#00e5ff"];
+    // Each enemy is one solid colour, in this order: critical, high and
+    // medium severity
+    const ENEMY_BODY_COLORS = ["#e5484d", "#f76b15", "#b48cff"];
     const FRIGHTENED_ENEMY_COLOR = "#a0a0a0";
     const FRIGHTENED_FLASH_COLOR = "#ffffff";
 
@@ -334,9 +352,9 @@
     const MINIMAP_SCALE = 0.3;
     const MINIMAP_MARGIN_PX = 10;
     const MAP_WALL_BEVEL_PX = 3;
-    const MAP_WALL_FACE_COLOR = "#5a5a5a";
-    const MAP_WALL_LIGHT_COLOR = "#8c8c8c";
-    const MAP_WALL_DARK_COLOR = "#262626";
+    const MAP_WALL_FACE_COLOR = "#1f3a5a";
+    const MAP_WALL_LIGHT_COLOR = "#2acfa6";
+    const MAP_WALL_DARK_COLOR = "#0a1422";
     const MAP_DOT_RADIUS_PX = 3;
     const MAP_PELLET_RADIUS_PX = 7;
     const MAP_GUY_COLORS = { left: "red", top: ["blue", "green"], right: "orange" };
@@ -373,8 +391,9 @@
     // drawn at the screen's real resolution, so text stays sharp.
     const GAME_W = VIEW_W;
     const GAME_H = VIEW_H + HUD_HEIGHT_PX;
-    const HUD_BACKGROUND_COLOR = "#1a1410";
-    const HUD_TEXT_COLOR = "#e8d9b0";
+    const HUD_BACKGROUND_COLOR = "#0b1626";
+    const HUD_TEXT_COLOR = "#2acfa6";
+    const HUD_HINT_COLOR = "#c8d6e5";
 
     // ---- Game state ----
 
@@ -1851,7 +1870,7 @@
     }
 
     // Casts one ray per screen column through the grid and draws the wall
-    // it hits as a vertical strip of brick. Returns each column's wall
+    // it hits as a vertical strip of code panel. Returns each column's wall
     // distance, so nearer things can be drawn in front and farther ones
     // hidden behind.
     function drawWalls(walls, camera) {
@@ -1927,52 +1946,84 @@
         return null;
     }
 
-    // One screen column of brick wall: rows of bricks, staggered every other
-    // row, each brick a slightly different shade, with mortar lines between,
-    // all dimmed by distance
+    // One screen column of a code panel wall: the green frame, then each
+    // line's highlight and token colour at this point across the face, all
+    // dimmed by distance
     function drawWallColumn(column, { distance, isNorthSouthFace, hitAlong, squareX, squareY }, horizonY) {
         const wallHeight = VIEW_H / distance;
         const wallTop = horizonY - wallHeight / 2;
-        const rowHeight = wallHeight / BRICK_ROWS;
+        const lineHeight = wallHeight / CODE_LINES_PER_WALL;
 
         let light = clamp(1 - distance / FOG_DISTANCE_SQUARES, MIN_LIGHT, 1);
         if (isNorthSouthFace) {
             light *= SIDE_WALL_SHADE;
         }
 
-        for (let row = 0; row < BRICK_ROWS; row++) {
-            const rowTop = wallTop + row * rowHeight;
-            const along = hitAlong * BRICKS_PER_SQUARE + (row % 2) * 0.5;
-            const brickIndex = Math.floor(along);
-            const isMortarColumn = along - brickIndex < MORTAR_SHARE;
+        // Strips overlap a touch so no hairline gaps show between them once
+        // the game is scaled to the window
+        const isFrameColumn = hitAlong < WALL_FRAME_SHARE || hitAlong > 1 - WALL_FRAME_SHARE;
+        if (isFrameColumn) {
+            ctx.fillStyle = toColor(WALL_FRAME_RGB, light);
+            ctx.fillRect(column, wallTop, WALL_STRIP_OVERLAP_W, wallHeight);
+            return;
+        }
+        ctx.fillStyle = toColor(WALL_BASE_RGB, light);
+        ctx.fillRect(column, wallTop, WALL_STRIP_OVERLAP_W, wallHeight);
 
-            let rgb = MORTAR_RGB;
-            if (!isMortarColumn) {
-                const variation = getBrickVariation(squareX, squareY, row, brickIndex, isNorthSouthFace);
-                rgb = WALL_BASE_RGB.map((channel) => channel * (1 + variation));
+        // Frame along the top and bottom of the panel
+        const frameHeight = wallHeight * WALL_FRAME_SHARE;
+        ctx.fillStyle = toColor(WALL_FRAME_RGB, light);
+        ctx.fillRect(column, wallTop, WALL_STRIP_OVERLAP_W, frameHeight);
+        ctx.fillRect(column, wallTop + wallHeight - frameHeight, WALL_STRIP_OVERLAP_W, frameHeight);
+
+        const charIndex = Math.floor(hitAlong * CODE_CHARS_PER_LINE);
+        for (let line = 1; line < CODE_LINES_PER_WALL - 1; line++) {
+            const lineTop = wallTop + line * lineHeight;
+            const face = { squareX, squareY, isNorthSouthFace, line };
+            if (getWallRandom(face, 0) < FINDING_LINE_CHANCE) {
+                ctx.fillStyle = toColor(FINDING_LINE_RGB, light);
+                ctx.fillRect(column, lineTop, WALL_STRIP_OVERLAP_W, lineHeight + 0.5);
             }
-            ctx.fillStyle = toColor(rgb, light);
-            // Strips overlap a touch so no hairline gaps show between them
-            // once the game is scaled to the window
-            ctx.fillRect(column, rowTop, WALL_STRIP_OVERLAP_W, rowHeight + 0.5);
-
-            // Mortar line along the bottom of each row of bricks
-            ctx.fillStyle = toColor(MORTAR_RGB, light);
-            ctx.fillRect(column, rowTop + rowHeight * (1 - MORTAR_SHARE), WALL_STRIP_OVERLAP_W, rowHeight * MORTAR_SHARE + 0.5);
+            const tokenRgb = getCodeTokenRgbAt(face, charIndex);
+            if (tokenRgb !== null) {
+                const tokenHeight = lineHeight * CODE_TOKEN_HEIGHT_SHARE;
+                ctx.fillStyle = toColor(tokenRgb, light);
+                ctx.fillRect(column, lineTop + (lineHeight - tokenHeight) / 2, WALL_STRIP_OVERLAP_W, tokenHeight);
+            }
         }
     }
 
-    // A steady random shade, from -BRICK_SHADE_VARIATION to
-    // +BRICK_SHADE_VARIATION, for one brick, so each brick keeps its own look
-    function getBrickVariation(squareX, squareY, row, brickIndex, isNorthSouthFace) {
-        let seed = squareX * 73856093 ^ squareY * 19349663 ^ row * 83492791 ^ brickIndex * 2654435761;
+    // The colour of the code token covering this character of one line of
+    // a wall face, or null for a space. Each line is an indent then tokens
+    // of 2 to 6 characters with a space between, out to its own length; a
+    // few lines are blank.
+    function getCodeTokenRgbAt(face, charIndex) {
+        if (getWallRandom(face, 1) < BLANK_LINE_CHANCE) {
+            return null;
+        }
+        const indent = Math.floor(getWallRandom(face, 2) * (CODE_MAX_INDENT_CHARS / 2)) * 2;
+        const lineEnd = indent + 4 + Math.floor(getWallRandom(face, 3) * (CODE_CHARS_PER_LINE - indent - 5));
+        let tokenStart = indent + 1;
+        for (let token = 0; tokenStart <= Math.min(charIndex, lineEnd); token++) {
+            const tokenEnd = Math.min(lineEnd, tokenStart + 2 + Math.floor(getWallRandom(face, 10 + token) * 5));
+            if (charIndex < tokenEnd) {
+                return CODE_TOKEN_RGBS[Math.floor(getWallRandom(face, 40 + token) * CODE_TOKEN_RGBS.length)];
+            }
+            tokenStart = tokenEnd + 1;
+        }
+        return null;
+    }
+
+    // A steady random number from 0 to 1 for one line of one wall face and
+    // one purpose (salt), so the code on each wall keeps its look
+    function getWallRandom({ squareX, squareY, isNorthSouthFace, line }, salt) {
+        let seed = squareX * 73856093 ^ squareY * 19349663 ^ line * 83492791 ^ salt * 2654435761;
         if (isNorthSouthFace) {
             seed ^= 0x5bd1e995;
         }
         seed = Math.imul(seed ^ (seed >>> 15), 0x2c1b3c6d);
         seed = Math.imul(seed ^ (seed >>> 12), 0x297a2d39);
-        const unit = ((seed ^ (seed >>> 15)) >>> 0) / 4294967296;
-        return (unit * 2 - 1) * BRICK_SHADE_VARIATION;
+        return ((seed ^ (seed >>> 15)) >>> 0) / 4294967296;
     }
 
     function toColor(rgb, light) {
@@ -2196,9 +2247,9 @@
         return msLeft > 0 && msLeft < FRIGHTENED_FLASH_FINAL_MS && isFlashBlock;
     }
 
-    // The enemy's blocky shape (a bar across the top and a leg down each
-    // side) in one colour, drawn into its own small canvas the first time
-    // it is needed
+    // The enemy as a bug in one colour, facing the guy: a round shell split
+    // down the middle, a head with eyes and feelers, and three legs each
+    // side. Drawn into its own small canvas the first time it is needed.
     // hasTarget paints a red-and-white bullseye on the middle of its body,
     // shown on frightened enemies to say they are safe to hit
     function getEnemySprite(color, hasTarget) {
@@ -2209,15 +2260,60 @@
             sprite.width = 4 * block;
             sprite.height = 3 * block;
             const spriteCtx = sprite.getContext("2d");
+            const centerX = 2 * block;
+            const shellY = 1.85 * block;
+            const headY = 0.75 * block;
+
+            spriteCtx.lineCap = "round";
+            spriteCtx.strokeStyle = color;
+            spriteCtx.lineWidth = 0.16 * block;
+            for (const side of [-1, 1]) {
+                // Legs: out from the shell, then bending down to the floor
+                for (const legY of [1.45, 1.9, 2.35]) {
+                    spriteCtx.beginPath();
+                    spriteCtx.moveTo(centerX + side * 0.6 * block, legY * block);
+                    spriteCtx.lineTo(centerX + side * 1.45 * block, (legY - 0.3) * block);
+                    spriteCtx.lineTo(centerX + side * 1.85 * block, (legY + 0.45) * block);
+                    spriteCtx.stroke();
+                }
+                // Feelers
+                spriteCtx.beginPath();
+                spriteCtx.moveTo(centerX + side * 0.2 * block, headY - 0.3 * block);
+                spriteCtx.quadraticCurveTo(centerX + side * 0.5 * block, 0, centerX + side * 0.95 * block, 0.12 * block);
+                spriteCtx.stroke();
+            }
+
             spriteCtx.fillStyle = color;
-            spriteCtx.fillRect(0, 0, 4 * block, block);
-            spriteCtx.fillRect(0, 0, block, 3 * block);
-            spriteCtx.fillRect(3 * block, 0, block, 3 * block);
+            spriteCtx.strokeStyle = BUG_OUTLINE_COLOR;
+            spriteCtx.lineWidth = 0.06 * block;
+            spriteCtx.beginPath();
+            spriteCtx.ellipse(centerX, shellY, 0.95 * block, 1.1 * block, 0, 0, Math.PI * 2);
+            spriteCtx.fill();
+            spriteCtx.stroke();
+            spriteCtx.beginPath();
+            spriteCtx.moveTo(centerX, shellY - 0.75 * block);
+            spriteCtx.lineTo(centerX, shellY + 1.1 * block);
+            spriteCtx.stroke();
+
+            spriteCtx.beginPath();
+            spriteCtx.arc(centerX, headY, 0.5 * block, 0, Math.PI * 2);
+            spriteCtx.fill();
+            spriteCtx.stroke();
+            for (const side of [-1, 1]) {
+                spriteCtx.fillStyle = "#ffffff";
+                spriteCtx.beginPath();
+                spriteCtx.arc(centerX + side * 0.2 * block, headY - 0.05 * block, 0.15 * block, 0, Math.PI * 2);
+                spriteCtx.fill();
+                spriteCtx.fillStyle = "#000000";
+                spriteCtx.beginPath();
+                spriteCtx.arc(centerX + side * 0.2 * block, headY, 0.07 * block, 0, Math.PI * 2);
+                spriteCtx.fill();
+            }
 
             if (hasTarget) {
-                // Rings from the outside in, alternating red and white
-                const centerX = 2 * block;
-                const centerY = 1.1 * block;
+                // Rings from the outside in, alternating red and white, on
+                // the shell
+                const centerY = shellY;
                 TARGET_RING_RADII_BLOCKS.forEach((radius, i) => {
                     spriteCtx.fillStyle = TARGET_RING_COLORS[i % TARGET_RING_COLORS.length];
                     spriteCtx.beginPath();
@@ -2634,7 +2730,7 @@
         ctx.restore();
 
         // Thin frame round the map
-        ctx.strokeStyle = "#5a5a5a";
+        ctx.strokeStyle = MAP_WALL_FACE_COLOR;
         ctx.lineWidth = 2;
         ctx.strokeRect(left - 1, MINIMAP_MARGIN_PX - 1, mapW * MINIMAP_SCALE + 2, mapH * MINIMAP_SCALE + 2);
     }
@@ -2778,6 +2874,7 @@
         ctx.font = "bold 20px monospace";
         ctx.fillText(parts.join("    "), 14, VIEW_H + 24);
         ctx.font = "13px monospace";
+        ctx.fillStyle = HUD_HINT_COLOR;
         ctx.fillText(CONTROLS_HINTS[lastInputKind], 14, VIEW_H + 45);
     }
 
@@ -2786,6 +2883,15 @@
     function drawStartScreen() {
         ctx.fillStyle = "rgba(5, 8, 20, 0.72)";
         ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+
+        // Three green rings over the title, like the ... of a Semgrep pattern
+        ctx.strokeStyle = DOT_COLOR;
+        ctx.lineWidth = 9;
+        for (const offset of [-1, 0, 1]) {
+            ctx.beginPath();
+            ctx.arc(VIEW_W / 2 + offset * 48, VIEW_H / 2 - 128, 17, 0, Math.PI * 2);
+            ctx.stroke();
+        }
 
         ctx.textAlign = "center";
         ctx.lineJoin = "round";
@@ -2804,7 +2910,7 @@
 
         ctx.font = "15px sans-serif";
         const lines = [
-            "Eat every dot. Rainbow pellets make the enemies safe to hit.",
+            "Eat every dot and squash the bugs. Rainbow pellets make them safe to hit.",
             `Keyboard: ${CONTROLS_HINTS.keyboard}`,
             `Controller: ${CONTROLS_HINTS.gamepad}`,
             `Phone: ${CONTROLS_HINTS.touch}`,
