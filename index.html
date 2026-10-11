@@ -412,6 +412,16 @@
     const HUD_BACKGROUND_COLOR = "#0b1626";
     const HUD_TEXT_COLOR = "#2acfa6";
     const HUD_HINT_COLOR = "#c8d6e5";
+    const HUD_PIE_EMPTY_COLOR = "#1f3a5a";
+
+    // Status bar layout: where the top row starts and its middle, the gap
+    // between items, the width of each life's blaster icon and the size
+    // of the dots pie
+    const HUD_LEFT_PX = 14;
+    const HUD_ROW_MIDDLE_PX = 19;
+    const HUD_GAP_PX = 28;
+    const HUD_LIFE_ICON_W_PX = 30;
+    const HUD_PIE_RADIUS_PX = 11;
 
     // ---- Game state ----
 
@@ -459,6 +469,7 @@
     //   frightenedEnemyIndexes  enemies still frightened and edible
     //   returningEnemyCorners   eaten or shot enemies walking back (index -> [x, y])
     //   returningEnemyUntilMs   earliest each of those may stop being a ghost
+    //   startingDotCount    dots and pellets the level began with
     //   bullets             { x, y, vx, vy, lastMs } in squares, velocity in
     //                       squares per ms
     let maze = null;
@@ -802,6 +813,7 @@
             returningEnemyCorners: new Map(),
             returningEnemyUntilMs: new Map(),
             bullets: [],
+            startingDotCount: dots.size + powerPellets.size,
         };
     }
 
@@ -2986,23 +2998,95 @@
         ctx.stroke();
     }
 
+    // Along the top of the status bar, left to right: the score, the level,
+    // a little bubble blaster for each life left, a pie that fills in as
+    // the level's dots are eaten, and the power time left while powered up.
+    // The controls hint runs along the bottom.
     function drawStatusBar(nowMs) {
         ctx.fillStyle = HUD_BACKGROUND_COLOR;
         ctx.fillRect(0, VIEW_H, VIEW_W, HUD_HEIGHT_PX);
 
-        const dotsLeft = maze.dots.size + maze.powerPellets.size;
-        const parts = [`SCORE ${score}`, `LEVEL ${level}`, `LIVES ${livesLeft}`, `DOTS ${dotsLeft}`];
-        if (nowMs < maze.frightenedUntilMs) {
-            parts.push(`POWER ${Math.ceil((maze.frightenedUntilMs - nowMs) / 1000)}`);
-        }
-
+        const rowMiddleY = VIEW_H + HUD_ROW_MIDDLE_PX;
         ctx.fillStyle = HUD_TEXT_COLOR;
         ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
         ctx.font = "bold 20px monospace";
-        ctx.fillText(parts.join("    "), 14, VIEW_H + 24);
+        let x = HUD_LEFT_PX;
+        for (const text of [String(score), `LEVEL ${level}`]) {
+            ctx.fillText(text, x, rowMiddleY);
+            x += ctx.measureText(text).width + HUD_GAP_PX;
+        }
+
+        for (let life = 0; life < livesLeft; life++) {
+            drawLifeBlaster(x, rowMiddleY);
+            x += HUD_LIFE_ICON_W_PX;
+        }
+        x += HUD_GAP_PX;
+
+        const dotsLeft = maze.dots.size + maze.powerPellets.size;
+        drawDotsPie(x + HUD_PIE_RADIUS_PX, rowMiddleY, 1 - dotsLeft / maze.startingDotCount);
+        x += HUD_PIE_RADIUS_PX * 2 + HUD_GAP_PX;
+
+        if (nowMs < maze.frightenedUntilMs) {
+            ctx.fillStyle = HUD_TEXT_COLOR;
+            ctx.fillText(`POWER ${Math.ceil((maze.frightenedUntilMs - nowMs) / 1000)}`, x, rowMiddleY);
+        }
+
+        ctx.textBaseline = "alphabetic";
         ctx.font = "13px monospace";
         ctx.fillStyle = HUD_HINT_COLOR;
         ctx.fillText(CONTROLS_HINTS[lastInputKind], 14, VIEW_H + 45);
+    }
+
+    // A tiny side view of the bubble blaster, pointing right, for one life,
+    // with its left edge at x and centred on y
+    function drawLifeBlaster(x, y) {
+        ctx.fillStyle = toColor(BLASTER_GRIP_RGB, 1);
+        ctx.beginPath();
+        ctx.moveTo(x + 5, y + 2);
+        ctx.lineTo(x + 11, y + 2);
+        ctx.lineTo(x + 9, y + 10);
+        ctx.lineTo(x + 3, y + 10);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.fillStyle = toColor(BLASTER_BODY_RGB, 1);
+        ctx.beginPath();
+        ctx.roundRect(x + 1, y - 3, 18, 7, 3);
+        ctx.fill();
+        ctx.fillStyle = toColor(BLASTER_BARREL_RGB, 1);
+        ctx.fillRect(x + 18, y - 1.5, 6, 4);
+        ctx.fillStyle = toColor(BLASTER_RING_RGB, 1);
+        ctx.fillRect(x + 23, y - 3, 2.5, 7);
+
+        ctx.fillStyle = toColor(BLASTER_TANK_RGB, 1);
+        ctx.beginPath();
+        ctx.arc(x + 8, y - 6, 4.5, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    // A pie centred on (x, y): an empty ring that fills in clockwise from
+    // the top as eatenShare goes from 0 to 1
+    function drawDotsPie(x, y, eatenShare) {
+        ctx.fillStyle = HUD_PIE_EMPTY_COLOR;
+        ctx.beginPath();
+        ctx.arc(x, y, HUD_PIE_RADIUS_PX, 0, Math.PI * 2);
+        ctx.fill();
+
+        if (eatenShare > 0) {
+            ctx.fillStyle = DOT_COLOR;
+            ctx.beginPath();
+            ctx.moveTo(x, y);
+            ctx.arc(x, y, HUD_PIE_RADIUS_PX, -Math.PI / 2, -Math.PI / 2 + eatenShare * Math.PI * 2);
+            ctx.closePath();
+            ctx.fill();
+        }
+
+        ctx.strokeStyle = DOT_COLOR;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(x, y, HUD_PIE_RADIUS_PX, 0, Math.PI * 2);
+        ctx.stroke();
     }
 
     // Shown until the player first clicks or presses a key: the game's name,
