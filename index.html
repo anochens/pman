@@ -30,16 +30,26 @@
 <script>
     // ---- The world ----
 
-    // Each level's maze size in squares, and how many enemies it has. Level
-    // 1 is a small maze with one enemy; each next level is bigger with one
-    // more enemy; levels past the end of the list repeat its last entry.
-    // Mazes are built on a lattice, and the guy's start (bottom middle) and
-    // the side tunnel (middle row) must land on open rooms, so both sizes
-    // must be 3 more than a multiple of 4.
+    // Each level's maze size in squares, how many enemies it has and how
+    // often they step. straightness is the chance the maze's corridors keep
+    // going the same way rather than turning, so early mazes have few
+    // turns; extraGapChance is the chance each wall between two rooms is
+    // opened as well, adding loops. Level 1 is a tiny, nearly straight maze
+    // with one slow enemy; each level grows a little. Levels past the end
+    // of the list repeat its last entry, with the enemies a little faster
+    // each time. Mazes are built on a lattice, and the guy's start (bottom
+    // middle) and the side tunnel (middle row) must land on open rooms, so
+    // both sizes must be 3 more than a multiple of 4.
     const LEVEL_LAYOUTS = [
-        { cols: 11, rows: 11, enemyCount: 1 },
-        { cols: 15, rows: 15, enemyCount: 2 },
-        { cols: 19, rows: 19, enemyCount: 3 },
+        { cols: 7, rows: 7, enemyCount: 1, enemyStepMs: 1500, straightness: 0.9, extraGapChance: 0 },
+        { cols: 11, rows: 7, enemyCount: 1, enemyStepMs: 1400, straightness: 0.8, extraGapChance: 0.02 },
+        { cols: 11, rows: 11, enemyCount: 1, enemyStepMs: 1300, straightness: 0.7, extraGapChance: 0.04 },
+        { cols: 15, rows: 11, enemyCount: 2, enemyStepMs: 1250, straightness: 0.6, extraGapChance: 0.06 },
+        { cols: 15, rows: 15, enemyCount: 2, enemyStepMs: 1200, straightness: 0.5, extraGapChance: 0.08 },
+        { cols: 19, rows: 15, enemyCount: 2, enemyStepMs: 1100, straightness: 0.4, extraGapChance: 0.1 },
+        { cols: 19, rows: 19, enemyCount: 3, enemyStepMs: 1000, straightness: 0.3, extraGapChance: 0.12 },
+        { cols: 19, rows: 19, enemyCount: 3, enemyStepMs: 1000, straightness: 0.15, extraGapChance: 0.14 },
+        { cols: 19, rows: 19, enemyCount: 3, enemyStepMs: 1000, straightness: 0, extraGapChance: 0.15 },
     ];
 
     // The current level's maze size, the row with the side tunnel (walking
@@ -52,10 +62,6 @@
     let guyStartSquare = [Math.floor(worldCols / 2), worldRows - 2];
 
     const STEP_DIRECTIONS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
-
-    // After the maze is carved, each wall between two rooms has this chance
-    // of being opened as well, to add loops
-    const MAZE_EXTRA_GAP_CHANCE = 0.15;
 
     // No open area may be bigger than this many squares each way
     const OPEN_AREA_MAX_SIZE = 2;
@@ -116,6 +122,14 @@
         touch: "Hold: walk   Swipe up/down: one step   Swipe left/right: turn   Tap: blow bubbles",
     };
 
+    // How to go on from the death and level complete screens, for each way
+    // of playing
+    const CONTINUE_PROMPTS = {
+        keyboard: "Press Space",
+        gamepad: "Press A",
+        touch: "Tap",
+    };
+
     // Keys held to walk: forward/back and sideways step
     const MOVE_KEYS = {
         ArrowUp: { forward: 1 }, w: { forward: 1 }, W: { forward: 1 },
@@ -125,10 +139,8 @@
 
     // ---- Enemies ----
 
-    // Enemies step one square this often while the mazes are still growing.
-    // From the first level after the last layout, they move this many times
-    // faster each level than the level before.
-    const LEVEL_1_ENEMY_STEP_INTERVAL_MS = 1000;
+    // From the first level after the last layout, enemies move this many
+    // times faster each level than the level before
     const ENEMY_SPEEDUP_PER_LEVEL = 1.05;
 
     // An enemy catches the guy (or, frightened, gets eaten) once its middle
@@ -339,6 +351,22 @@
     const DEATH_FADE_MS = 500;
     const DEATH_MAX_ALPHA = 0.88;
 
+    // Each game starts with this many lives. Losing one replays the same
+    // level; losing the last goes back to level 1.
+    const LIVES_PER_GAME = 4;
+
+    // Clearing a level stops play and sets off fireworks until the player
+    // presses on: a new burst every FIREWORK_INTERVAL_MS, each a ring of
+    // FIREWORK_SPARK_COUNT sparks flying out and falling over
+    // FIREWORK_LIFE_MS. The view dims to LEVEL_COMPLETE_DIM_ALPHA.
+    const FIREWORK_INTERVAL_MS = 350;
+    const FIREWORK_LIFE_MS = 1400;
+    const FIREWORK_SPARK_COUNT = 28;
+    const FIREWORK_SPREAD_PX = 110;
+    const FIREWORK_GRAVITY_PX = 60;
+    const FIREWORK_COLORS = ["#ff4040", "#ffd23f", "#3fd2ff", "#7dff5a", "#ff6ae6", "#ffffff", "#ff9a2e"];
+    const LEVEL_COMPLETE_DIM_ALPHA = 0.55;
+
     // The whole game (view plus status bar) is laid out at GAME_W by GAME_H
     // and scaled up or down to fill the window, keeping its shape and
     // centred, with black borders where the window's shape differs. It is
@@ -355,9 +383,17 @@
 
     let level = 1;
 
-    // Score carries over between levels and resets on a new game
+    // Score carries over between levels and resets on a new game. Replaying
+    // a level after dying puts it back to what it was when the level began.
     let score = 0;
+    let levelStartScore = 0;
+    let livesLeft = LIVES_PER_GAME;
     let isDead = false;
+
+    // Set when the last dot of a level is eaten: play stops and fireworks
+    // go off until the player presses on to the next level
+    let isLevelComplete = false;
+    let levelCompleteMs = -Infinity;
 
     // Colour of the enemy that caught the guy, and when, for the death screen
     let deathColor = "#ff2020";
@@ -458,8 +494,8 @@
             return;
         }
         event.preventDefault();
-        if (isDead) {
-            startGame();
+        if (isDead || isLevelComplete) {
+            continueAfterPause();
             return;
         }
         shoot(performance.now());
@@ -503,7 +539,7 @@
         lastInputKind = "touch";
         clearTimeout(touchHoldTimerId);
         touchHoldTimerId = setTimeout(() => {
-            if (touchStart !== null && hasStarted && !isDead) {
+            if (touchStart !== null && !isPlayPaused()) {
                 isTouchHolding = true;
             }
         }, TOUCH_HOLD_MS);
@@ -544,9 +580,9 @@
             beginPlaying();
             return;
         }
-        if (isDead) {
+        if (isDead || isLevelComplete) {
             if (isTap) {
-                startGame();
+                continueAfterPause();
             }
             return;
         }
@@ -603,9 +639,9 @@
             }
             return;
         }
-        if (isDead) {
+        if (isDead || isLevelComplete) {
             if (isNewPress("start") || isNewPress("fire")) {
-                startGame();
+                continueAfterPause();
             }
             return;
         }
@@ -629,7 +665,7 @@
     // until the guy is in the middle of a square, which his clock checks
     // every few milliseconds; see stepGuy.
     function queueTurn(direction) {
-        if (isDead || !hasStarted) {
+        if (isPlayPaused()) {
             return;
         }
         maze = { ...maze, guy: { ...maze.guy, queuedTurn: direction } };
@@ -647,19 +683,47 @@
     function startGame() {
         level = 1;
         score = 0;
+        levelStartScore = 0;
+        livesLeft = LIVES_PER_GAME;
         startLevel();
+    }
+
+    // Nothing moves on the start screen, after dying, or while the level
+    // complete fireworks are showing
+    function isPlayPaused() {
+        return isDead || isLevelComplete || !hasStarted;
+    }
+
+    // Space, a tap, A or Start on the death or level complete screen: on to
+    // the next level, the same level again with the score it began with, or
+    // a new game once the last life is gone
+    function continueAfterPause() {
+        if (isLevelComplete) {
+            level++;
+            levelStartScore = score;
+            startLevel();
+            return;
+        }
+        if (livesLeft > 0) {
+            score = levelStartScore;
+            startLevel();
+            return;
+        }
+        startGame();
     }
 
     // Builds a fresh maze for the current level and restarts the enemy clock
     // so the enemies' first step is a full interval in
     function startLevel() {
         isDead = false;
+        isLevelComplete = false;
+        heldKeys = new Set();
         const layout = getLevelLayout(level);
         worldCols = layout.cols;
         worldRows = layout.rows;
         tunnelRow = Math.floor(worldRows / 2);
         guyStartSquare = [Math.floor(worldCols / 2), worldRows - 2];
-        maze = createMaze(layout.enemyCount);
+        maze = createMaze(layout);
         touchStepWaiting = 0;
 
         enemyTickCount = 0;
@@ -669,8 +733,8 @@
 
     // A new maze for the current level: walls, dots, power pellets, and
     // the guy and enemyCount enemies at their start squares
-    function createMaze(enemyCount) {
-        const walls = buildValidWalls(guyStartSquare);
+    function createMaze({ enemyCount, straightness, extraGapChance }) {
+        const walls = buildValidWalls(guyStartSquare, straightness, extraGapChance);
         const dotRuns = placeDotRuns(walls, guyStartSquare);
         const { dots, powerPellets } = placePowerPellets(walls, dotRuns, guyStartSquare);
         const enemies = getEnemyStartSquares(walls, guyStartSquare, enemyCount);
@@ -727,11 +791,11 @@
     // The guy's clock. Whenever he is standing in the middle of a square he
     // eats what is there, takes any turn that was waiting, and starts his
     // next step if a walking key is held. Then any enemy that has reached
-    // him is sorted out. Clearing the last dot and pellet starts the next
-    // level.
+    // him is sorted out. Clearing the last dot and pellet finishes the
+    // level and sets off the fireworks.
     function stepGuy() {
         const nowMs = performance.now();
-        if (isDead || !hasStarted) {
+        if (isPlayPaused()) {
             return;
         }
 
@@ -754,8 +818,11 @@
             current = meal.maze;
             score += meal.points;
             if (current.dots.size === 0 && current.powerPellets.size === 0) {
-                level++;
-                startLevel();
+                maze = current;
+                isLevelComplete = true;
+                levelCompleteMs = nowMs;
+                heldKeys = new Set();
+                isTouchHolding = false;
                 return;
             }
 
@@ -956,7 +1023,7 @@
     }
 
     function stepEnemies() {
-        if (isDead || !hasStarted) {
+        if (isPlayPaused()) {
             return;
         }
         enemyTickCount++;
@@ -970,10 +1037,10 @@
         }
     }
 
-    // Steady while the mazes grow, then faster every level after that
+    // Set by the level's layout, then faster every level after the last one
     function getEnemyStepIntervalMs() {
         const speedups = Math.max(0, level - LEVEL_LAYOUTS.length);
-        return LEVEL_1_ENEMY_STEP_INTERVAL_MS / ENEMY_SPEEDUP_PER_LEVEL ** speedups;
+        return getLevelLayout(level).enemyStepMs / ENEMY_SPEEDUP_PER_LEVEL ** speedups;
     }
 
     // The maze size and enemy count for a level; past the end of the list,
@@ -1037,9 +1104,9 @@
     }
 
     // Bullets fly smoothly, so they move on their own fast clock rather than
-    // the enemy one; they stop where they are once the guy is dead
+    // the enemy one; they stop where they are once play stops
     function stepBullets() {
-        if (isDead) {
+        if (isDead || isLevelComplete) {
             return;
         }
         const flight = moveBullets(maze, performance.now());
@@ -1145,10 +1212,13 @@
         return { maze: updated, points, isCaught: false, catcherIndex: null };
     }
 
-    // The guy is caught: the game stops, and the screen will flood with the
-    // colour of the enemy that got him
+    // The guy is caught: he loses a life, the game stops, and the screen
+    // will flood with the colour of the enemy that got him
     function dieToEnemy(catcherIndex, nowMs) {
         isDead = true;
+        livesLeft--;
+        heldKeys = new Set();
+        isTouchHolding = false;
         deathColor = ENEMY_BODY_COLORS[catcherIndex % ENEMY_BODY_COLORS.length];
         deathMs = nowMs;
     }
@@ -1361,8 +1431,8 @@
 
     // Walls for a new maze, retried until no open square is sealed off, no
     // corridor is a dead end and no open area is too big
-    function buildValidWalls(guySquare) {
-        let walls = generateMazeWalls(guySquare);
+    function buildValidWalls(guySquare, straightness, extraGapChance) {
+        let walls = generateMazeWalls(guySquare, straightness, extraGapChance);
         for (let attempt = 1; attempt < MAZE_GENERATION_MAX_ATTEMPTS; attempt++) {
             const isValid = isEveryOpenSquareReachable(walls, guySquare)
                 && isFreeOfDeadEnds(walls)
@@ -1370,7 +1440,7 @@
             if (isValid) {
                 break;
             }
-            walls = generateMazeWalls(guySquare);
+            walls = generateMazeWalls(guySquare, straightness, extraGapChance);
         }
         return walls;
     }
@@ -1378,8 +1448,10 @@
     // Builds the maze on a lattice. "Rooms" at odd (x, y) are always open,
     // "pillars" at even (x, y) are always wall, and each square between two
     // neighbouring rooms is either a wall or a gap. Corridors are therefore
-    // one square wide, so no open area is bigger than 2x2.
-    function generateMazeWalls([guySqX, guySqY]) {
+    // one square wide, so no open area is bigger than 2x2. With chance
+    // straightness, the carving carries on in the way it was already going,
+    // giving long straight corridors and few turns.
+    function generateMazeWalls([guySqX, guySqY], straightness, extraGapChance) {
         const walls = new Set();
 
         // Start with every non-room square walled, except the tunnel ends
@@ -1395,19 +1467,23 @@
 
         // Carve a random maze joining every room, starting from the guy
         const visitedRoomKeys = new Set([wallKey(guySqX, guySqY)]);
-        const stack = [[guySqX, guySqY]];
+        const stack = [{ x: guySqX, y: guySqY, dx: 0, dy: 0 }];
         while (stack.length > 0) {
-            const [x, y] = stack[stack.length - 1];
+            const { x, y, dx, dy } = stack[stack.length - 1];
             const unvisited = getNeighbourRooms(x, y)
                 .filter(([roomX, roomY]) => !visitedRoomKeys.has(wallKey(roomX, roomY)));
             if (unvisited.length === 0) {
                 stack.pop();
                 continue;
             }
-            const [nextX, nextY] = unvisited[Math.floor(Math.random() * unvisited.length)];
+            const straightOn = unvisited.find(([roomX, roomY]) => roomX === x + dx * 2 && roomY === y + dy * 2);
+            let [nextX, nextY] = unvisited[Math.floor(Math.random() * unvisited.length)];
+            if (straightOn !== undefined && Math.random() < straightness) {
+                [nextX, nextY] = straightOn;
+            }
             walls.delete(wallKey((x + nextX) / 2, (y + nextY) / 2));
             visitedRoomKeys.add(wallKey(nextX, nextY));
-            stack.push([nextX, nextY]);
+            stack.push({ x: nextX, y: nextY, dx: (nextX - x) / 2, dy: (nextY - y) / 2 });
         }
 
         // Give every dead-end room a second way out, then knock out a few
@@ -1426,7 +1502,7 @@
                     openCount = 1;
                 }
                 for (const [gapX, gapY] of gaps) {
-                    if (Math.random() < MAZE_EXTRA_GAP_CHANCE) {
+                    if (Math.random() < extraGapChance) {
                         openCount++;
                     }
                 }
@@ -1723,6 +1799,9 @@
 
         if (isDead) {
             drawDeathMessage(nowMs);
+        }
+        if (isLevelComplete) {
+            drawLevelComplete(nowMs);
         }
         if (!hasStarted) {
             drawStartScreen();
@@ -2689,7 +2768,7 @@
         ctx.fillRect(0, VIEW_H, VIEW_W, HUD_HEIGHT_PX);
 
         const dotsLeft = maze.dots.size + maze.powerPellets.size;
-        const parts = [`SCORE ${score}`, `LEVEL ${level}`, `DOTS ${dotsLeft}`];
+        const parts = [`SCORE ${score}`, `LEVEL ${level}`, `LIVES ${livesLeft}`, `DOTS ${dotsLeft}`];
         if (nowMs < maze.frightenedUntilMs) {
             parts.push(`POWER ${Math.ceil((maze.frightenedUntilMs - nowMs) / 1000)}`);
         }
@@ -2747,18 +2826,82 @@
         ctx.fillRect(0, 0, VIEW_W, VIEW_H);
         ctx.globalAlpha = 1;
 
+        const press = CONTINUE_PROMPTS[lastInputKind];
+        let title = "Game over";
+        let lines = [`${press} to play again`];
+        if (livesLeft > 0) {
+            title = "You died";
+            lines = [
+                `${livesLeft} ${livesLeft === 1 ? "life" : "lives"} left`,
+                `${press} to try level ${level} again`,
+            ];
+        }
+        drawOverlayText(title, lines);
+    }
+
+    // Level complete: the view dims, fireworks burst over it, and the
+    // message says how to go on to the next level
+    function drawLevelComplete(nowMs) {
+        ctx.fillStyle = `rgba(5, 8, 20, ${LEVEL_COMPLETE_DIM_ALPHA})`;
+        ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+        drawFireworks(nowMs - levelCompleteMs);
+        drawOverlayText("You win!", [
+            `Level ${level} complete    Score ${score}`,
+            `${CONTINUE_PROMPTS[lastInputKind]} to start level ${level + 1}`,
+        ]);
+    }
+
+    // Every burst still in the air at elapsedMs. Burst k goes off at
+    // k * FIREWORK_INTERVAL_MS; its place, colour and spark angles come
+    // from k, so each burst looks the same on every frame.
+    function drawFireworks(elapsedMs) {
+        const newestBurst = Math.floor(elapsedMs / FIREWORK_INTERVAL_MS);
+        const oldestBurst = Math.max(0, Math.ceil((elapsedMs - FIREWORK_LIFE_MS) / FIREWORK_INTERVAL_MS));
+        for (let burst = oldestBurst; burst <= newestBurst; burst++) {
+            const progress = (elapsedMs - burst * FIREWORK_INTERVAL_MS) / FIREWORK_LIFE_MS;
+            const centerX = VIEW_W * (0.12 + 0.76 * getBurstRandom(burst, 1));
+            const centerY = VIEW_H * (0.12 + 0.4 * getBurstRandom(burst, 2));
+            const color = FIREWORK_COLORS[Math.floor(getBurstRandom(burst, 3) * FIREWORK_COLORS.length)];
+            const spread = FIREWORK_SPREAD_PX * (0.6 + 0.6 * getBurstRandom(burst, 4)) * (1 - (1 - progress) ** 3);
+            const fall = FIREWORK_GRAVITY_PX * progress ** 2;
+
+            ctx.globalAlpha = 1 - progress;
+            ctx.fillStyle = color;
+            for (let spark = 0; spark < FIREWORK_SPARK_COUNT; spark++) {
+                const angle = (spark / FIREWORK_SPARK_COUNT + getBurstRandom(burst, 5)) * Math.PI * 2;
+                const reach = spread * (0.75 + 0.25 * getBurstRandom(burst * FIREWORK_SPARK_COUNT + spark, 6));
+                ctx.beginPath();
+                ctx.arc(centerX + Math.cos(angle) * reach, centerY + Math.sin(angle) * reach + fall, 2.6, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+        ctx.globalAlpha = 1;
+    }
+
+    // A fixed number from 0 to 1 for this burst and purpose (salt), so a
+    // burst keeps its look from frame to frame
+    function getBurstRandom(burst, salt) {
+        const value = Math.sin(burst * 12.9898 + salt * 78.233) * 43758.5453;
+        return value - Math.floor(value);
+    }
+
+    // A big title in the middle of the view with smaller lines under it,
+    // white edged in black so it reads on any colour
+    function drawOverlayText(title, lines) {
         ctx.textAlign = "center";
         ctx.lineJoin = "round";
         ctx.strokeStyle = "rgba(0, 0, 0, 0.8)";
         ctx.fillStyle = "#fff";
         ctx.font = "bold 48px sans-serif";
         ctx.lineWidth = 6;
-        ctx.strokeText("You died", VIEW_W / 2, VIEW_H / 2);
-        ctx.fillText("You died", VIEW_W / 2, VIEW_H / 2);
+        ctx.strokeText(title, VIEW_W / 2, VIEW_H / 2);
+        ctx.fillText(title, VIEW_W / 2, VIEW_H / 2);
         ctx.font = "bold 20px sans-serif";
         ctx.lineWidth = 4;
-        ctx.strokeText("Press Space to play again", VIEW_W / 2, VIEW_H / 2 + 40);
-        ctx.fillText("Press Space to play again", VIEW_W / 2, VIEW_H / 2 + 40);
+        lines.forEach((line, i) => {
+            ctx.strokeText(line, VIEW_W / 2, VIEW_H / 2 + 40 + i * 28);
+            ctx.fillText(line, VIEW_W / 2, VIEW_H / 2 + 40 + i * 28);
+        });
     }
 </script>
 
