@@ -125,8 +125,8 @@
     // How to go on from the death and level complete screens, for each way
     // of playing
     const CONTINUE_PROMPTS = {
-        keyboard: "Press Space",
-        gamepad: "Press A",
+        keyboard: "Space",
+        gamepad: "A",
         touch: "Tap",
     };
 
@@ -203,8 +203,17 @@
     // running north-south are drawn a little darker, as if lit from one
     // side.
     const MATRIX_GLYPHS = "ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ0123456789Z:.=*+<>|";
-    const MATRIX_GREEN_RGB = [60, 255, 120];
-    const MATRIX_HEAD_COLOR = "#e0ffe8";
+    // Every wall starts green. Each bubble that bursts on a wall fades its
+    // rain to the next colour in this list over WALL_LOOK_CHANGE_MS.
+    const MATRIX_PALETTE_RGBS = [
+        [60, 255, 120],
+        [60, 220, 255],
+        [190, 120, 255],
+        [255, 190, 60],
+        [255, 100, 200],
+    ];
+    const WALL_LOOK_CHANGE_MS = 4000;
+    const MATRIX_HEAD_WHITENESS = 0.8;
     const MATRIX_BACKGROUND_RGB = [2, 12, 5];
     const MATRIX_DIM_SHARE = 0.22;
     const MATRIX_GLYPH_PX = 16;
@@ -212,8 +221,8 @@
     const MATRIX_ROWS_PER_WALL = 10;
     const MATRIX_TILE_ROWS = 24;
     const MATRIX_TRAIL_ROWS = 8;
-    const MATRIX_MIN_ROWS_PER_SECOND = 2;
-    const MATRIX_MAX_ROWS_PER_SECOND = 7;
+    const MATRIX_MIN_ROWS_PER_SECOND = 0.4;
+    const MATRIX_MAX_ROWS_PER_SECOND = 1.2;
     const WALL_SEAM_RGB = [8, 50, 22];
     const WALL_SEAM_SHARE = 0.015;
     const SIDE_WALL_SHADE = 0.72;
@@ -290,6 +299,14 @@
     const BUBBLE_EDGE_COLOR = "rgba(220, 255, 245, 0.95)";
     const BUBBLE_SHINE_COLOR = "rgba(255, 255, 255, 0.9)";
     const BUBBLE_START_AHEAD_SQUARES = 0.3;
+
+    // A bubble that hits a wall bursts in a splat lasting SPLAT_MS, its
+    // droplets flying out SPLAT_REACH and falling SPLAT_FALL bubble radii
+    const SPLAT_MS = 450;
+    const SPLAT_DROPLET_COUNT = 10;
+    const SPLAT_REACH = 1.6;
+    const SPLAT_FALL = 1.2;
+    const SPLAT_WALL_SLACK_SQUARES = 0.2;
 
     // A new bubble is drawn coming out of the blaster's nozzle: for its
     // first BUBBLE_LAUNCH_MS it glides from the tip, where it is
@@ -375,6 +392,15 @@
     const GUIDE_ICON_GAP_PX = 14;
     const GUIDE_BUG_ICON_W_PX = 30;
     const GUIDE_DOT_ICON_RADIUS_PX = 7;
+
+    // Each bug arrow carries a badge with how many steps away the bug is.
+    // Within GUIDE_CLOSE_STEPS the badge turns red and the arrow blinks,
+    // dimming to BLINK_ALPHA every other BLINK_MS.
+    const GUIDE_BADGE_RADIUS_PX = 9;
+    const GUIDE_CLOSE_STEPS = 3;
+    const GUIDE_CLOSE_BADGE_COLOR = "#d81f2a";
+    const GUIDE_CLOSE_BLINK_MS = 200;
+    const GUIDE_CLOSE_BLINK_ALPHA = 0.35;
     const GUIDE_DOT_ARROW_SIZE_PX = 16;
     const DOT_GUIDE_MAX_LEFT = 4;
 
@@ -398,6 +424,17 @@
     const FIREWORK_GRAVITY_PX = 60;
     const FIREWORK_COLORS = ["#ff4040", "#ffd23f", "#3fd2ff", "#7dff5a", "#ff6ae6", "#ffffff", "#ff9a2e"];
     const LEVEL_COMPLETE_DIM_ALPHA = 0.55;
+
+    // Start, death and level complete screens: the big word sits this far
+    // above the middle and swells by PULSE_SHARE every PULSE_MS; lives and
+    // the button sit this far below the middle; lives are drawn this many
+    // times the status bar size
+    const OVERLAY_TITLE_RAISE_PX = 40;
+    const OVERLAY_PULSE_SHARE = 0.04;
+    const OVERLAY_PULSE_MS = 1200;
+    const OVERLAY_LIVES_OFFSET_Y_PX = 30;
+    const OVERLAY_BUTTON_OFFSET_Y_PX = 90;
+    const OVERLAY_LIFE_SCALE = 2;
 
     // The whole game (view plus status bar) is laid out at GAME_W by GAME_H
     // and scaled up or down to fill the window, keeping its shape and
@@ -466,6 +503,10 @@
     //   returningEnemyCorners   eaten or shot enemies walking back (index -> [x, y])
     //   returningEnemyUntilMs   earliest each of those may stop being a ghost
     //   startingDotCount    dots and pellets the level began with
+    //   splats              { x, y, bornMs } where bubbles burst on walls
+    //   wallLookIndexes     walls that have been shot ("x,y" -> the colours
+    //                       it is fading between, as MATRIX_PALETTE_RGBS
+    //                       indexes, and when the fade began)
     //   bullets             { x, y, vx, vy, lastMs } in squares, velocity in
     //                       squares per ms
     let maze = null;
@@ -809,6 +850,8 @@
             returningEnemyCorners: new Map(),
             returningEnemyUntilMs: new Map(),
             bullets: [],
+            splats: [],
+            wallLookIndexes: new Map(),
             startingDotCount: dots.size + powerPellets.size,
         };
     }
@@ -1179,9 +1222,11 @@
             let isGone = false;
 
             for (let step = 0; step < stepCount && !isGone; step++) {
+                const [lastX, lastY] = [x, y];
                 x = (x + bullet.vx * stepMs + worldCols) % worldCols;
                 y += bullet.vy * stepMs;
                 if (isWallAt(updated.walls, Math.floor(x), Math.floor(y))) {
+                    updated = splatOnWall(updated, wallKey(Math.floor(x), Math.floor(y)), lastX, lastY, nowMs);
                     isGone = true;
                     continue;
                 }
@@ -1202,7 +1247,22 @@
             }
         }
 
-        return { maze: { ...updated, bullets: remainingBullets }, points };
+        const splats = updated.splats.filter(({ bornMs }) => nowMs - bornMs < SPLAT_MS);
+        return { maze: { ...updated, bullets: remainingBullets, splats }, points };
+    }
+
+    // A bubble bursts on a wall: a splat where it hit, and the wall's rain
+    // starts fading to the next colour in MATRIX_PALETTE_RGBS
+    function splatOnWall(currentMaze, hitWallKey, x, y, nowMs) {
+        const lookIndex = currentMaze.wallLookIndexes.get(hitWallKey)?.toIndex ?? 0;
+        return {
+            ...currentMaze,
+            splats: [...currentMaze.splats, { x, y, bornMs: nowMs }],
+            wallLookIndexes: new Map([
+                ...currentMaze.wallLookIndexes,
+                [hitWallKey, { fromIndex: lookIndex, toIndex: (lookIndex + 1) % MATRIX_PALETTE_RGBS.length, changedMs: nowMs }],
+            ]),
+        };
     }
 
     // ---- Eating and catching ----
@@ -1846,7 +1906,7 @@
 
         const camera = getCamera(maze, nowMs);
         drawCeilingAndFloor(camera);
-        const wallDepths = drawWalls(maze.walls, camera, nowMs);
+        const wallDepths = drawWalls(maze, camera, nowMs);
         drawWorldObjects(maze, camera, wallDepths, nowMs);
         drawBubbleBlaster(maze, camera, nowMs);
         drawCrosshair();
@@ -1861,7 +1921,7 @@
             drawLevelComplete(nowMs);
         }
         if (!hasStarted) {
-            drawStartScreen();
+            drawStartScreen(nowMs);
         }
 
         ctx.restore();
@@ -1911,19 +1971,19 @@
     // it hits as a vertical strip of Matrix rain. Returns each column's
     // wall distance, so nearer things can be drawn in front and farther
     // ones hidden behind.
-    function drawWalls(walls, camera, nowMs) {
+    function drawWalls(currentMaze, camera, nowMs) {
         const wallDepths = new Array(VIEW_W).fill(Infinity);
 
         for (let column = 0; column < VIEW_W; column++) {
             const cameraX = (2 * column) / VIEW_W - 1;
             const rayX = camera.dirX + camera.planeX * cameraX;
             const rayY = camera.dirY + camera.planeY * cameraX;
-            const hit = castRay(walls, camera.x, camera.y, rayX, rayY);
+            const hit = castRay(currentMaze.walls, camera.x, camera.y, rayX, rayY);
             if (hit === null) {
                 continue;
             }
             wallDepths[column] = hit.distance;
-            drawWallColumn(column, hit, camera.horizonY, nowMs);
+            drawWallColumn(column, hit, camera.horizonY, currentMaze.wallLookIndexes, nowMs);
         }
 
         return wallDepths;
@@ -1985,9 +2045,10 @@
     }
 
     // One screen column of Matrix rain wall: a 1-pixel-wide slice of the
-    // rain picture, scrolled down at this glyph column's own speed and
-    // dimmed by distance, with a dark seam where two wall squares meet
-    function drawWallColumn(column, { distance, isNorthSouthFace, hitAlong, squareX, squareY }, horizonY, nowMs) {
+    // rain picture in the wall's colour (fading to a new one if it was just
+    // shot), scrolled down at this glyph column's own speed and dimmed by
+    // distance, with a dark seam where two wall squares meet
+    function drawWallColumn(column, { distance, isNorthSouthFace, hitAlong, squareX, squareY }, horizonY, wallLookIndexes, nowMs) {
         const wallHeight = VIEW_H / distance;
         const wallTop = horizonY - wallHeight / 2;
 
@@ -2004,7 +2065,8 @@
             return;
         }
 
-        const texture = getMatrixTexture();
+        const look = wallLookIndexes.get(wallKey(squareX, squareY)) ?? { fromIndex: 0, toIndex: 0, changedMs: -Infinity };
+        const lookProgress = clamp((nowMs - look.changedMs) / WALL_LOOK_CHANGE_MS, 0, 1);
         const glyphColumn = Math.floor(hitAlong * MATRIX_COLUMNS_PER_WALL);
         const face = { squareX, squareY, isNorthSouthFace, glyphColumn };
         const rowsPerSecond = MATRIX_MIN_ROWS_PER_SECOND
@@ -2012,24 +2074,38 @@
         const tileHeight = MATRIX_TILE_ROWS * MATRIX_GLYPH_PX;
         const scrolled = getWallRandom(face, 1) * tileHeight - (nowMs / 1000) * rowsPerSecond * MATRIX_GLYPH_PX;
         const sourceY = ((scrolled % tileHeight) + tileHeight) % tileHeight;
-        const sourceX = Math.min(texture.width - 1, Math.floor(hitAlong * texture.width));
-        ctx.drawImage(texture, sourceX, sourceY, 1, MATRIX_ROWS_PER_WALL * MATRIX_GLYPH_PX, column, wallTop, WALL_STRIP_OVERLAP_W, wallHeight);
+        const sourceX = Math.min(MATRIX_COLUMNS_PER_WALL * MATRIX_GLYPH_PX - 1, Math.floor(hitAlong * MATRIX_COLUMNS_PER_WALL * MATRIX_GLYPH_PX));
+        const sourceHeight = MATRIX_ROWS_PER_WALL * MATRIX_GLYPH_PX;
+
+        // A shot wall shows its old colour with the new one fading in over it
+        const layers = [{ paletteIndex: look.toIndex, alpha: 1 }];
+        if (lookProgress < 1) {
+            layers.splice(0, 1, { paletteIndex: look.fromIndex, alpha: 1 }, { paletteIndex: look.toIndex, alpha: lookProgress });
+        }
+        for (const { paletteIndex, alpha } of layers) {
+            ctx.globalAlpha = alpha;
+            ctx.drawImage(getMatrixTexture(paletteIndex), sourceX, sourceY, 1, sourceHeight, column, wallTop, WALL_STRIP_OVERLAP_W, wallHeight);
+        }
+        ctx.globalAlpha = 1;
 
         ctx.fillStyle = `rgba(0, 0, 0, ${1 - light})`;
         ctx.fillRect(column, wallTop, WALL_STRIP_OVERLAP_W, wallHeight);
     }
 
-    // The rain picture, drawn once: MATRIX_COLUMNS_PER_WALL columns of
-    // random glyphs on near-black. Down each column, two bright drops run
-    // half a tile apart, each a white-green head with a green trail fading
-    // above it, over dim glyphs. The tile of MATRIX_TILE_ROWS rows is drawn
-    // twice, one under the other, so any window of a wall's height can be
-    // cut from it as it scrolls round.
-    let matrixTexture = null;
-    function getMatrixTexture() {
-        if (matrixTexture !== null) {
-            return matrixTexture;
+    // The rain picture in one MATRIX_PALETTE_RGBS colour, drawn the first
+    // time it is needed: MATRIX_COLUMNS_PER_WALL columns of random glyphs
+    // on near-black. Down each column, two bright drops run half a tile
+    // apart, each a near-white head with a trail fading above it, over dim
+    // glyphs. The tile of MATRIX_TILE_ROWS rows is drawn twice, one under
+    // the other, so any window of a wall's height can be cut from it as it
+    // scrolls round.
+    const matrixTextures = new Map();
+    function getMatrixTexture(paletteIndex) {
+        if (matrixTextures.has(paletteIndex)) {
+            return matrixTextures.get(paletteIndex);
         }
+        const rainRgb = MATRIX_PALETTE_RGBS[paletteIndex];
+        const headRgb = rainRgb.map((channel) => channel + (255 - channel) * MATRIX_HEAD_WHITENESS);
         const glyph = MATRIX_GLYPH_PX;
         const texture = document.createElement("canvas");
         texture.width = MATRIX_COLUMNS_PER_WALL * glyph;
@@ -2047,11 +2123,11 @@
             for (let row = 0; row < MATRIX_TILE_ROWS; row++) {
                 const char = MATRIX_GLYPHS[Math.floor(Math.random() * MATRIX_GLYPHS.length)];
                 const rowsBehindHead = (((headRow - row) % dropSpacing) + dropSpacing) % dropSpacing;
-                let color = toColor(MATRIX_GREEN_RGB, MATRIX_DIM_SHARE);
+                let color = toColor(rainRgb, MATRIX_DIM_SHARE);
                 if (rowsBehindHead === 0) {
-                    color = MATRIX_HEAD_COLOR;
+                    color = toColor(headRgb, 1);
                 } else if (rowsBehindHead < MATRIX_TRAIL_ROWS) {
-                    color = toColor(MATRIX_GREEN_RGB, 1 - rowsBehindHead / MATRIX_TRAIL_ROWS * (1 - MATRIX_DIM_SHARE));
+                    color = toColor(rainRgb, 1 - rowsBehindHead / MATRIX_TRAIL_ROWS * (1 - MATRIX_DIM_SHARE));
                 }
                 textureCtx.fillStyle = color;
                 for (const tile of [0, 1]) {
@@ -2059,8 +2135,8 @@
                 }
             }
         }
-        matrixTexture = texture;
-        return matrixTexture;
+        matrixTextures.set(paletteIndex, texture);
+        return texture;
     }
 
     // A steady random number from 0 to 1 for one glyph column of one wall
@@ -2112,6 +2188,9 @@
             const [x, y] = key.split(",").map(Number);
             objects.push({ x: x + 0.5, y: y + 0.5, kind: "pellet" });
         }
+        for (const { x, y, bornMs } of currentMaze.splats) {
+            objects.push({ x, y, kind: "splat", bornMs });
+        }
         // Bubbles still coming out of the nozzle are drawn with the blaster
         for (const { x, y, bornMs } of currentMaze.bullets) {
             if (nowMs - bornMs >= BUBBLE_LAUNCH_MS) {
@@ -2136,6 +2215,10 @@
                 drawWorldBubble(view, camera, wallDepths);
                 continue;
             }
+            if (object.kind === "splat") {
+                drawSplat(view, camera, wallDepths, (nowMs - object.bornMs) / SPLAT_MS);
+                continue;
+            }
             if (object.kind === "pellet") {
                 drawWorldPellet(view, camera, wallDepths, nowMs);
                 continue;
@@ -2153,6 +2236,39 @@
         }
         const { x, y, radius } = getWorldBubbleOnScreen(view, camera);
         drawBubble(x, y, radius, 1);
+    }
+
+    // A bubble bursting on a wall, progress going 0 to 1 over SPLAT_MS: a
+    // flat blob that fades, with SPLAT_DROPLET_COUNT droplets flying out
+    // round it and falling a little. The splat sits just in front of the
+    // wall, so it is hidden only by a wall nearer than that one.
+    function drawSplat(view, camera, wallDepths, progress) {
+        const column = Math.round(view.screenX);
+        if (column < 0 || column >= VIEW_W || wallDepths[column] < view.depth - SPLAT_WALL_SLACK_SQUARES) {
+            return;
+        }
+        const { x, y, radius } = getWorldBubbleOnScreen(view, camera);
+        const fade = 1 - progress;
+
+        ctx.globalAlpha = fade;
+        ctx.fillStyle = BUBBLE_FILL_COLOR;
+        ctx.strokeStyle = BUBBLE_EDGE_COLOR;
+        ctx.lineWidth = Math.max(1, radius * 0.12);
+        ctx.beginPath();
+        ctx.ellipse(x, y, radius * (1 + progress * 0.8), radius * (0.7 + progress * 0.3), 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = BUBBLE_EDGE_COLOR;
+        for (let droplet = 0; droplet < SPLAT_DROPLET_COUNT; droplet++) {
+            const angle = (droplet / SPLAT_DROPLET_COUNT) * Math.PI * 2;
+            const reach = radius * (1 + progress * SPLAT_REACH);
+            const fall = radius * progress * progress * SPLAT_FALL;
+            ctx.beginPath();
+            ctx.arc(x + Math.cos(angle) * reach, y + Math.sin(angle) * reach + fall, Math.max(1, radius * 0.18 * fade), 0, Math.PI * 2);
+            ctx.fill();
+        }
+        ctx.globalAlpha = 1;
     }
 
     // A power pellet floating over the floor, pulsing gently so it catches
@@ -2728,14 +2844,25 @@
             const nearness = 1 - steps / GUIDE_ENEMY_MAX_STEPS;
             const size = GUIDE_ARROW_MIN_SIZE_PX + (GUIDE_ARROW_MAX_SIZE_PX - GUIDE_ARROW_MIN_SIZE_PX) * nearness;
             const sprite = getEnemySprite(getEnemyColor(currentMaze, i, nowMs), isEnemyFrightened(currentMaze, i, nowMs));
+
+            // A close bug's arrow blinks
+            const isClose = steps <= GUIDE_CLOSE_STEPS;
+            const isBlinkOff = isClose && Math.floor(nowMs / GUIDE_CLOSE_BLINK_MS) % 2 === 1;
+            if (isBlinkOff) {
+                ctx.globalAlpha = GUIDE_CLOSE_BLINK_ALPHA;
+            }
             drawGuideArrow(
                 VIEW_W / 2 + Math.sin(turn) * GUIDE_RING_RADIUS_X_PX,
                 VIEW_H / 2 - Math.cos(turn) * GUIDE_RING_RADIUS_Y_PX,
                 turn,
                 size,
                 getEnemyColor(currentMaze, i, nowMs),
-                (iconX, iconY) => ctx.drawImage(sprite, iconX - GUIDE_BUG_ICON_W_PX / 2, iconY - GUIDE_BUG_ICON_W_PX * 3 / 8, GUIDE_BUG_ICON_W_PX, GUIDE_BUG_ICON_W_PX * 3 / 4),
+                (iconX, iconY) => {
+                    ctx.drawImage(sprite, iconX - GUIDE_BUG_ICON_W_PX / 2, iconY - GUIDE_BUG_ICON_W_PX * 3 / 8, GUIDE_BUG_ICON_W_PX, GUIDE_BUG_ICON_W_PX * 3 / 4);
+                    drawStepsBadge(iconX + GUIDE_BUG_ICON_W_PX / 2, iconY + GUIDE_BUG_ICON_W_PX / 4, steps, isClose);
+                },
             );
+            ctx.globalAlpha = 1;
         });
 
         const dotsLeft = currentMaze.dots.size + currentMaze.powerPellets.size;
@@ -2761,6 +2888,27 @@
             ctx.fill();
             ctx.stroke();
         });
+    }
+
+    // A little round badge centred on (x, y) with how many steps away a bug
+    // is, red when it is close
+    function drawStepsBadge(x, y, steps, isClose) {
+        ctx.fillStyle = HUD_BACKGROUND_COLOR;
+        if (isClose) {
+            ctx.fillStyle = GUIDE_CLOSE_BADGE_COLOR;
+        }
+        ctx.strokeStyle = "#ffffff";
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(x, y, GUIDE_BADGE_RADIUS_PX, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = "#ffffff";
+        ctx.font = "bold 12px sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(String(steps), x, y + 0.5);
+        ctx.textBaseline = "alphabetic";
     }
 
     // How far the guy would have to turn to face along (dx, dy): 0 straight
@@ -3077,9 +3225,10 @@
         ctx.stroke();
     }
 
-    // Shown until the player first clicks or presses a key: the game's name,
-    // how to start, and the controls, over a dimmed view of the maze
-    function drawStartScreen() {
+    // Shown until the player first clicks or presses a key: the game's name
+    // and a play button over a dimmed view of the maze. The controls are in
+    // the status bar.
+    function drawStartScreen(nowMs) {
         ctx.fillStyle = "rgba(5, 8, 20, 0.72)";
         ctx.fillRect(0, 0, VIEW_W, VIEW_H);
 
@@ -3092,38 +3241,13 @@
             ctx.stroke();
         }
 
-        ctx.textAlign = "center";
-        ctx.lineJoin = "round";
-        ctx.strokeStyle = "rgba(0, 0, 0, 0.8)";
-        ctx.fillStyle = DOT_COLOR;
-        ctx.font = "bold 64px sans-serif";
-        ctx.lineWidth = 8;
-        ctx.strokeText("PMAN", VIEW_W / 2, VIEW_H / 2 - 50);
-        ctx.fillText("PMAN", VIEW_W / 2, VIEW_H / 2 - 50);
-
-        ctx.fillStyle = "#ffffff";
-        ctx.font = "bold 26px sans-serif";
-        ctx.lineWidth = 5;
-        ctx.strokeText("Click, tap or press a button to play", VIEW_W / 2, VIEW_H / 2 + 5);
-        ctx.fillText("Click, tap or press a button to play", VIEW_W / 2, VIEW_H / 2 + 5);
-
-        ctx.font = "15px sans-serif";
-        const lines = [
-            "Eat every dot and squash the bugs. Rainbow pellets make them safe to hit.",
-            `Keyboard: ${CONTROLS_HINTS.keyboard}`,
-            `Controller: ${CONTROLS_HINTS.gamepad}`,
-            `Phone: ${CONTROLS_HINTS.touch}`,
-        ];
-        lines.forEach((line, i) => {
-            ctx.lineWidth = 4;
-            ctx.strokeText(line, VIEW_W / 2, VIEW_H / 2 + 46 + i * 22);
-            ctx.fillText(line, VIEW_W / 2, VIEW_H / 2 + 46 + i * 22);
-        });
+        drawOverlayTitle("PMAN", DOT_COLOR, nowMs);
+        drawContinueButton("Play", nowMs);
     }
 
     // The view floods with the colour of the enemy that caught the guy,
-    // filling in over DEATH_FADE_MS, with the message on top in white
-    // edged in black so it reads on any colour
+    // filling in over DEATH_FADE_MS. Then a big word, a blaster for each
+    // life left, and the button to go on.
     function drawDeathMessage(nowMs) {
         const fill = clamp((nowMs - deathMs) / DEATH_FADE_MS, 0, 1);
         ctx.globalAlpha = DEATH_MAX_ALPHA * fill;
@@ -3131,29 +3255,31 @@
         ctx.fillRect(0, 0, VIEW_W, VIEW_H);
         ctx.globalAlpha = 1;
 
-        const press = CONTINUE_PROMPTS[lastInputKind];
-        let title = "Game over";
-        let lines = [`${press} to play again`];
-        if (livesLeft > 0) {
-            title = "You died";
-            lines = [
-                `${livesLeft} ${livesLeft === 1 ? "life" : "lives"} left`,
-                `${press} to try level ${level} again`,
-            ];
+        if (livesLeft === 0) {
+            drawOverlayTitle("GAME OVER", "#ffffff", nowMs);
+            drawContinueButton(CONTINUE_PROMPTS[lastInputKind], nowMs);
+            return;
         }
-        drawOverlayText(title, lines);
+        drawOverlayTitle("OOPS!", "#ffffff", nowMs);
+        const livesWidth = livesLeft * HUD_LIFE_ICON_W_PX * OVERLAY_LIFE_SCALE;
+        ctx.save();
+        ctx.translate(VIEW_W / 2 - livesWidth / 2, VIEW_H / 2 + OVERLAY_LIVES_OFFSET_Y_PX);
+        ctx.scale(OVERLAY_LIFE_SCALE, OVERLAY_LIFE_SCALE);
+        for (let life = 0; life < livesLeft; life++) {
+            drawLifeBlaster(life * HUD_LIFE_ICON_W_PX, 0);
+        }
+        ctx.restore();
+        drawContinueButton(CONTINUE_PROMPTS[lastInputKind], nowMs);
     }
 
-    // Level complete: the view dims, fireworks burst over it, and the
-    // message says how to go on to the next level
+    // Level complete: the view dims, fireworks burst over it, a big word,
+    // and the button to go on
     function drawLevelComplete(nowMs) {
         ctx.fillStyle = `rgba(5, 8, 20, ${LEVEL_COMPLETE_DIM_ALPHA})`;
         ctx.fillRect(0, 0, VIEW_W, VIEW_H);
         drawFireworks(nowMs - levelCompleteMs);
-        drawOverlayText("You win!", [
-            `Level ${level} complete    Score ${score}`,
-            `${CONTINUE_PROMPTS[lastInputKind]} to start level ${level + 1}`,
-        ]);
+        drawOverlayTitle("YOU WIN!", DOT_COLOR, nowMs);
+        drawContinueButton(CONTINUE_PROMPTS[lastInputKind], nowMs);
     }
 
     // Every burst still in the air at elapsedMs. Burst k goes off at
@@ -3190,23 +3316,44 @@
         return value - Math.floor(value);
     }
 
-    // A big title in the middle of the view with smaller lines under it,
-    // white edged in black so it reads on any colour
-    function drawOverlayText(title, lines) {
+    // One big word just above the middle of the view, edged in black so it
+    // reads on any colour, gently swelling and shrinking
+    function drawOverlayTitle(title, color, nowMs) {
+        const scale = 1 + OVERLAY_PULSE_SHARE * Math.sin((nowMs / OVERLAY_PULSE_MS) * Math.PI * 2);
+        ctx.save();
+        ctx.translate(VIEW_W / 2, VIEW_H / 2 - OVERLAY_TITLE_RAISE_PX);
+        ctx.scale(scale, scale);
         ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
         ctx.lineJoin = "round";
         ctx.strokeStyle = "rgba(0, 0, 0, 0.8)";
-        ctx.fillStyle = "#fff";
-        ctx.font = "bold 48px sans-serif";
-        ctx.lineWidth = 6;
-        ctx.strokeText(title, VIEW_W / 2, VIEW_H / 2);
-        ctx.fillText(title, VIEW_W / 2, VIEW_H / 2);
-        ctx.font = "bold 20px sans-serif";
-        ctx.lineWidth = 4;
-        lines.forEach((line, i) => {
-            ctx.strokeText(line, VIEW_W / 2, VIEW_H / 2 + 40 + i * 28);
-            ctx.fillText(line, VIEW_W / 2, VIEW_H / 2 + 40 + i * 28);
-        });
+        ctx.fillStyle = color;
+        ctx.font = "bold 76px sans-serif";
+        ctx.lineWidth = 10;
+        ctx.strokeText(title, 0, 0);
+        ctx.fillText(title, 0, 0);
+        ctx.restore();
+    }
+
+    // A green "▶ label" button under the title, pulsing to say press it
+    function drawContinueButton(label, nowMs) {
+        const text = `▶ ${label}`;
+        const pulse = 0.5 + 0.5 * Math.sin((nowMs / OVERLAY_PULSE_MS) * Math.PI * 2);
+        ctx.save();
+        ctx.translate(VIEW_W / 2, VIEW_H / 2 + OVERLAY_BUTTON_OFFSET_Y_PX);
+        ctx.font = "bold 26px sans-serif";
+        const width = ctx.measureText(text).width + 44;
+        ctx.globalAlpha = 0.75 + 0.25 * pulse;
+        ctx.fillStyle = DOT_COLOR;
+        ctx.beginPath();
+        ctx.roundRect(-width / 2, -24, width, 48, 24);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = HUD_BACKGROUND_COLOR;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(text, 0, 1);
+        ctx.restore();
     }
 </script>
 
