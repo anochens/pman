@@ -328,8 +328,15 @@
     const BLASTER_TUBE_SLICE_LENGTH = 0.03;
 
     // Enemies are bugs, drawn into a canvas 4 by 3 blocks of this many
-    // pixels, then scaled into the view
-    const ENEMY_SPRITE_BLOCK_PX = 40;
+    // pixels, then scaled into the view. Their legs lift this many blocks
+    // as they scuttle, switching every BUG_LEG_STEP_MS; each has dark spots
+    // on its shell ([across, down, radius] in blocks from the shell's
+    // middle) and a soft shadow on the floor under it.
+    const ENEMY_SPRITE_BLOCK_PX = 60;
+    const BUG_LEG_LIFT_BLOCKS = 0.18;
+    const BUG_LEG_STEP_MS = 140;
+    const BUG_SPOTS_BLOCKS = [[-0.45, -0.1, 0.17], [0.42, 0.05, 0.2], [-0.35, 0.55, 0.15], [0.4, 0.62, 0.13]];
+    const BUG_SHADOW_ALPHA = 0.45;
     const BUG_OUTLINE_COLOR = "rgba(0, 0, 0, 0.55)";
 
     // The bullseye on a frightened enemy: ring sizes in blocks from the
@@ -2334,14 +2341,17 @@
         ctx.globalAlpha = 1;
     }
 
-    // An enemy standing on the floor, drawn one screen column at a time so
-    // a wall in front of part of it hides just that part
+    // An enemy standing on the floor, scuttling, with a soft shadow under
+    // it. The bug is drawn one screen column at a time so a wall in front
+    // of part of it hides just that part; the shadow shows only if the
+    // middle of the bug is in sight.
     function drawEnemy(currentMaze, index, view, camera, wallDepths, nowMs) {
         const hasTarget = isEnemyFrightened(currentMaze, index, nowMs);
-        let sprite = getEnemySprite(getEnemyColor(currentMaze, index, nowMs), hasTarget);
+        const legFrame = Math.floor(nowMs / BUG_LEG_STEP_MS) % 2;
+        let sprite = getEnemySprite(getEnemyColor(currentMaze, index, nowMs), hasTarget, legFrame);
         let alpha = clamp(1 - view.depth / FOG_DISTANCE_SQUARES, MIN_LIGHT, 1) * 0.5 + 0.5;
         if (currentMaze.returningEnemyCorners.has(index)) {
-            sprite = getEnemySprite(RETURNING_ENEMY_COLOR, false);
+            sprite = getEnemySprite(RETURNING_ENEMY_COLOR, false, legFrame);
             alpha = RETURNING_ENEMY_ALPHA;
         }
 
@@ -2351,7 +2361,16 @@
         const top = floorY - height;
         const left = view.screenX - width / 2;
 
-        ctx.imageSmoothingEnabled = false;
+        const middleColumn = Math.round(view.screenX);
+        const isMiddleInSight = middleColumn >= 0 && middleColumn < VIEW_W && wallDepths[middleColumn] >= view.depth;
+        if (isMiddleInSight) {
+            ctx.globalAlpha = BUG_SHADOW_ALPHA * alpha;
+            ctx.fillStyle = "#000000";
+            ctx.beginPath();
+            ctx.ellipse(view.screenX, floorY - height * 0.04, width * 0.4, height * 0.09, 0, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
         ctx.globalAlpha = alpha;
         const firstColumn = Math.max(0, Math.floor(left));
         const lastColumn = Math.min(VIEW_W - 1, Math.ceil(left + width));
@@ -2365,7 +2384,6 @@
             }
             ctx.drawImage(sprite, sourceX, 0, 1, sprite.height, column, top, 1, height);
         }
-        ctx.imageSmoothingEnabled = true;
         ctx.globalAlpha = 1;
     }
 
@@ -2392,13 +2410,16 @@
         return msLeft > 0 && msLeft < FRIGHTENED_FLASH_FINAL_MS && isFlashBlock;
     }
 
-    // The enemy as a bug in one colour, facing the guy: a round shell split
-    // down the middle, a head with eyes and feelers, and three legs each
-    // side. Drawn into its own small canvas the first time it is needed.
+    // The enemy as a bug in one colour, facing the guy, shaded as if lit
+    // from the upper left: a domed shell split down the middle with dark
+    // spots and a shine, a round head with glossy eyes and feelers, and
+    // three tube-shaded legs each side. legFrame (0 or 1) picks which legs
+    // are lifted, so swapping frames makes it scuttle. Drawn into its own
+    // small canvas the first time it is needed.
     // hasTarget paints a red-and-white bullseye on the middle of its body,
     // shown on frightened enemies to say they are safe to hit
-    function getEnemySprite(color, hasTarget) {
-        const cacheKey = `${color}|${hasTarget}`;
+    function getEnemySprite(color, hasTarget, legFrame = 0) {
+        const cacheKey = `${color}|${hasTarget}|${legFrame}`;
         if (!enemySpriteCache.has(cacheKey)) {
             const block = ENEMY_SPRITE_BLOCK_PX;
             const sprite = document.createElement("canvas");
@@ -2408,50 +2429,117 @@
             const centerX = 2 * block;
             const shellY = 1.85 * block;
             const headY = 0.75 * block;
+            const rgb = parseHexColor(color);
+            const shade = (amount) => toColor(shadeRgb(rgb, amount), 1);
 
+            // Legs: out from the shell, then bending down to the floor, in
+            // a dark edge, the body colour and a thin shine along the top.
+            // Alternate legs lift each frame, the way insects walk.
             spriteCtx.lineCap = "round";
-            spriteCtx.strokeStyle = color;
-            spriteCtx.lineWidth = 0.16 * block;
+            spriteCtx.lineJoin = "round";
             for (const side of [-1, 1]) {
-                // Legs: out from the shell, then bending down to the floor
-                for (const legY of [1.45, 1.9, 2.35]) {
-                    spriteCtx.beginPath();
-                    spriteCtx.moveTo(centerX + side * 0.6 * block, legY * block);
-                    spriteCtx.lineTo(centerX + side * 1.45 * block, (legY - 0.3) * block);
-                    spriteCtx.lineTo(centerX + side * 1.85 * block, (legY + 0.45) * block);
-                    spriteCtx.stroke();
-                }
-                // Feelers
+                [1.45, 1.9, 2.35].forEach((legY, legIndex) => {
+                    const isLifted = (legIndex + legFrame + (side > 0 ? 1 : 0)) % 2 === 0;
+                    let tipLift = 0;
+                    if (isLifted) {
+                        tipLift = BUG_LEG_LIFT_BLOCKS * block;
+                    }
+                    const points = [
+                        [centerX + side * 0.6 * block, legY * block],
+                        [centerX + side * 1.45 * block, (legY - 0.3) * block - tipLift / 2],
+                        [centerX + side * 1.85 * block, (legY + 0.45) * block - tipLift],
+                    ];
+                    const strokes = [
+                        { width: 0.2, color: shade(-0.6), shiftY: 0 },
+                        { width: 0.12, color: shade(-0.1), shiftY: 0 },
+                        { width: 0.04, color: shade(0.5), shiftY: -0.035 },
+                    ];
+                    for (const stroke of strokes) {
+                        spriteCtx.strokeStyle = stroke.color;
+                        spriteCtx.lineWidth = stroke.width * block;
+                        spriteCtx.beginPath();
+                        points.forEach(([x, y]) => spriteCtx.lineTo(x, y + stroke.shiftY * block));
+                        spriteCtx.stroke();
+                    }
+                });
+
+                // Feelers, with a shaded ball on the end
+                spriteCtx.strokeStyle = shade(-0.5);
+                spriteCtx.lineWidth = 0.08 * block;
                 spriteCtx.beginPath();
                 spriteCtx.moveTo(centerX + side * 0.2 * block, headY - 0.3 * block);
-                spriteCtx.quadraticCurveTo(centerX + side * 0.5 * block, 0, centerX + side * 0.95 * block, 0.12 * block);
+                spriteCtx.quadraticCurveTo(centerX + side * 0.5 * block, 0.05 * block, centerX + side * 0.9 * block, 0.2 * block);
                 spriteCtx.stroke();
+                fillShadedBall(spriteCtx, centerX + side * 0.9 * block, 0.2 * block, 0.1 * block, rgb);
             }
 
-            spriteCtx.fillStyle = color;
+            // Shell
+            const shellGradient = spriteCtx.createRadialGradient(
+                centerX - 0.35 * block, shellY - 0.5 * block, 0.05 * block,
+                centerX, shellY, 1.2 * block,
+            );
+            shellGradient.addColorStop(0, shade(0.6));
+            shellGradient.addColorStop(0.35, color);
+            shellGradient.addColorStop(1, shade(-0.65));
+            spriteCtx.fillStyle = shellGradient;
             spriteCtx.strokeStyle = BUG_OUTLINE_COLOR;
-            spriteCtx.lineWidth = 0.06 * block;
+            spriteCtx.lineWidth = 0.05 * block;
             spriteCtx.beginPath();
             spriteCtx.ellipse(centerX, shellY, 0.95 * block, 1.1 * block, 0, 0, Math.PI * 2);
             spriteCtx.fill();
             spriteCtx.stroke();
+
+            spriteCtx.fillStyle = shade(-0.55);
+            spriteCtx.globalAlpha = 0.7;
+            for (const [spotX, spotY, spotRadius] of BUG_SPOTS_BLOCKS) {
+                spriteCtx.beginPath();
+                spriteCtx.ellipse(centerX + spotX * block, shellY + spotY * block, spotRadius * block, spotRadius * 0.85 * block, 0, 0, Math.PI * 2);
+                spriteCtx.fill();
+            }
+            spriteCtx.globalAlpha = 1;
+
+            spriteCtx.strokeStyle = shade(-0.7);
+            spriteCtx.lineWidth = 0.06 * block;
             spriteCtx.beginPath();
-            spriteCtx.moveTo(centerX, shellY - 0.75 * block);
+            spriteCtx.moveTo(centerX, shellY - 0.7 * block);
             spriteCtx.lineTo(centerX, shellY + 1.1 * block);
             spriteCtx.stroke();
 
+            spriteCtx.fillStyle = "rgba(255, 255, 255, 0.55)";
+            spriteCtx.beginPath();
+            spriteCtx.ellipse(centerX - 0.4 * block, shellY - 0.55 * block, 0.24 * block, 0.12 * block, -0.6, 0, Math.PI * 2);
+            spriteCtx.fill();
+
+            // Shadow the head casts on the shell, then the head
+            spriteCtx.fillStyle = "rgba(0, 0, 0, 0.35)";
+            spriteCtx.beginPath();
+            spriteCtx.ellipse(centerX, headY + 0.45 * block, 0.5 * block, 0.18 * block, 0, 0, Math.PI * 2);
+            spriteCtx.fill();
+            fillShadedBall(spriteCtx, centerX, headY, 0.5 * block, rgb);
+            spriteCtx.strokeStyle = BUG_OUTLINE_COLOR;
+            spriteCtx.lineWidth = 0.05 * block;
             spriteCtx.beginPath();
             spriteCtx.arc(centerX, headY, 0.5 * block, 0, Math.PI * 2);
-            spriteCtx.fill();
             spriteCtx.stroke();
+
+            // Glossy eyes, each with a glint
             for (const side of [-1, 1]) {
-                spriteCtx.fillStyle = "#ffffff";
+                const eyeX = centerX + side * 0.2 * block;
+                const eyeY = headY - 0.05 * block;
+                const eyeGradient = spriteCtx.createRadialGradient(eyeX - 0.05 * block, eyeY - 0.05 * block, 0, eyeX, eyeY, 0.16 * block);
+                eyeGradient.addColorStop(0, "#ffffff");
+                eyeGradient.addColorStop(1, "#b8c4cc");
+                spriteCtx.fillStyle = eyeGradient;
                 spriteCtx.beginPath();
-                spriteCtx.arc(centerX + side * 0.2 * block, headY - 0.05 * block, 0.15 * block, 0, Math.PI * 2);
+                spriteCtx.arc(eyeX, eyeY, 0.16 * block, 0, Math.PI * 2);
                 spriteCtx.fill();
                 spriteCtx.fillStyle = "#000000";
                 spriteCtx.beginPath();
-                spriteCtx.arc(centerX + side * 0.2 * block, headY, 0.07 * block, 0, Math.PI * 2);
+                spriteCtx.arc(eyeX, eyeY + 0.04 * block, 0.08 * block, 0, Math.PI * 2);
+                spriteCtx.fill();
+                spriteCtx.fillStyle = "#ffffff";
+                spriteCtx.beginPath();
+                spriteCtx.arc(eyeX - 0.03 * block, eyeY + 0.01 * block, 0.025 * block, 0, Math.PI * 2);
                 spriteCtx.fill();
             }
 
@@ -2469,6 +2557,33 @@
             enemySpriteCache.set(cacheKey, sprite);
         }
         return enemySpriteCache.get(cacheKey);
+    }
+
+    // A ball in this colour, lit from the upper left: bright where the
+    // light hits, darkening round to the far side
+    function fillShadedBall(targetCtx, x, y, radius, rgb) {
+        const gradient = targetCtx.createRadialGradient(x - radius * 0.35, y - radius * 0.4, radius * 0.05, x, y, radius);
+        gradient.addColorStop(0, toColor(shadeRgb(rgb, 0.65), 1));
+        gradient.addColorStop(0.4, toColor(rgb, 1));
+        gradient.addColorStop(1, toColor(shadeRgb(rgb, -0.6), 1));
+        targetCtx.fillStyle = gradient;
+        targetCtx.beginPath();
+        targetCtx.arc(x, y, radius, 0, Math.PI * 2);
+        targetCtx.fill();
+    }
+
+    // The colour moved towards white (amount above 0) or black (below 0),
+    // by that share of the way
+    function shadeRgb(rgb, amount) {
+        if (amount >= 0) {
+            return rgb.map((channel) => channel + (255 - channel) * amount);
+        }
+        return rgb.map((channel) => channel * (1 + amount));
+    }
+
+    // [r, g, b] from a "#rrggbb" colour
+    function parseHexColor(hex) {
+        return [1, 3, 5].map((start) => parseInt(hex.slice(start, start + 2), 16));
     }
 
     // ---- The bubble blaster, a small 3D model ----
