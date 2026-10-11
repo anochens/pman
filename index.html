@@ -199,12 +199,15 @@
     // MATRIX_COLUMNS_PER_WALL columns by MATRIX_ROWS_PER_WALL rows of
     // glyphs, with bright drops falling down every column at its own
     // speed, between MIN and MAX rows a second. Squares are split by a
-    // thin dark seam, WALL_SEAM_SHARE of a square wide each side. Faces
+    // solid green seam, WALL_SEAM_SHARE of a square wide each side, so
+    // corners and the edges between squares stand out. Faces
     // running north-south are drawn a little darker, as if lit from one
     // side.
     const MATRIX_GLYPHS = "ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ0123456789Z:.=*+<>|";
-    // Every wall starts green. Each bubble that bursts on a wall fades its
-    // rain to the next colour in this list over WALL_LOOK_CHANGE_MS.
+    // Every wall starts green. A bubble that bursts on a wall leaves a
+    // splash mark on it (see drawShotMarkColumn), and after
+    // WALL_LOOK_CHANGE_DELAY_MS the rain fades to the next colour in this
+    // list over WALL_LOOK_CHANGE_MS.
     const MATRIX_PALETTE_RGBS = [
         [60, 255, 120],
         [60, 220, 255],
@@ -212,7 +215,29 @@
         [255, 190, 60],
         [255, 100, 200],
     ];
-    const WALL_LOOK_CHANGE_MS = 4000;
+    const WALL_LOOK_CHANGE_DELAY_MS = 1500;
+    const WALL_LOOK_CHANGE_MS = 3000;
+
+    // The splash mark: its size in wall widths, how much its edge wobbles,
+    // the dark dent in its middle, and its drips (where across the mark,
+    // as a share of its radius, and how far down, in wall heights). It
+    // lasts SHOT_MARK_MS, fading over the last SHOT_MARK_FADE_MS, and the
+    // drips reach full length by SHOT_MARK_DRIP_MS.
+    const SHOT_MARK_RADIUS = 0.17;
+    const SHOT_MARK_WOBBLE = 0.2;
+    const SHOT_MARK_DENT_RADIUS = 0.05;
+    const SHOT_MARK_COLOR = "rgb(200, 255, 240)";
+    const SHOT_MARK_DENT_COLOR = "rgb(10, 30, 25)";
+    const SHOT_MARK_ALPHA = 0.85;
+    const SHOT_MARK_DRIPS = [
+        { along: -0.6, length: 0.12 },
+        { along: -0.1, length: 0.22 },
+        { along: 0.45, length: 0.16 },
+    ];
+    const SHOT_MARK_DRIP_HALF_WIDTH = 0.012;
+    const SHOT_MARK_MS = 4500;
+    const SHOT_MARK_FADE_MS = 1500;
+    const SHOT_MARK_DRIP_MS = 1200;
     const MATRIX_HEAD_WHITENESS = 0.8;
     const MATRIX_BACKGROUND_RGB = [2, 12, 5];
     const MATRIX_DIM_SHARE = 0.22;
@@ -223,8 +248,8 @@
     const MATRIX_TRAIL_ROWS = 8;
     const MATRIX_MIN_ROWS_PER_SECOND = 0.4;
     const MATRIX_MAX_ROWS_PER_SECOND = 1.2;
-    const WALL_SEAM_RGB = [8, 50, 22];
-    const WALL_SEAM_SHARE = 0.015;
+    const WALL_SEAM_RGB = [30, 120, 60];
+    const WALL_SEAM_SHARE = 0.04;
     const SIDE_WALL_SHADE = 0.72;
     const WALL_STRIP_OVERLAP_W = 1.05;
 
@@ -380,26 +405,22 @@
 
     // Helper arrows (see drawGuideArrows): enemy arrows show within
     // GUIDE_ENEMY_MAX_STEPS walking steps, on an oval this far out from
-    // the crosshair, growing from MIN to MAX size as the enemy nears; the
-    // icon at each arrow's tail sits GAP past it. The dot arrow shows once
-    // DOT_GUIDE_MAX_LEFT or fewer dots and pellets are left, on the same
-    // oval.
+    // the crosshair. As the enemy nears, its arrow and bug icon grow from
+    // MIN to MAX size and from FAR_ALPHA to fully solid; within
+    // GUIDE_CLOSE_STEPS the arrow flashes, dimming to BLINK_ALPHA every
+    // other BLINK_MS. The dot arrow shows once DOT_GUIDE_MAX_LEFT or fewer
+    // dots and pellets are left, on the same oval.
     const GUIDE_ENEMY_MAX_STEPS = 10;
     const GUIDE_RING_RADIUS_X_PX = 170;
     const GUIDE_RING_RADIUS_Y_PX = 150;
-    const GUIDE_ARROW_MIN_SIZE_PX = 9;
-    const GUIDE_ARROW_MAX_SIZE_PX = 18;
-    const GUIDE_ICON_GAP_PX = 14;
-    const GUIDE_BUG_ICON_W_PX = 30;
+    const GUIDE_ARROW_MIN_SIZE_PX = 5;
+    const GUIDE_ARROW_MAX_SIZE_PX = 24;
+    const GUIDE_BUG_ICON_MIN_W_PX = 12;
+    const GUIDE_BUG_ICON_MAX_W_PX = 48;
+    const GUIDE_FAR_ALPHA = 0.5;
     const GUIDE_DOT_ICON_RADIUS_PX = 7;
-
-    // Each bug arrow carries a badge with how many steps away the bug is.
-    // Within GUIDE_CLOSE_STEPS the badge turns red and the arrow blinks,
-    // dimming to BLINK_ALPHA every other BLINK_MS.
-    const GUIDE_BADGE_RADIUS_PX = 9;
     const GUIDE_CLOSE_STEPS = 3;
-    const GUIDE_CLOSE_BADGE_COLOR = "#d81f2a";
-    const GUIDE_CLOSE_BLINK_MS = 200;
+    const GUIDE_CLOSE_BLINK_MS = 150;
     const GUIDE_CLOSE_BLINK_ALPHA = 0.35;
     const GUIDE_DOT_ARROW_SIZE_PX = 16;
     const DOT_GUIDE_MAX_LEFT = 4;
@@ -424,6 +445,7 @@
     const FIREWORK_GRAVITY_PX = 60;
     const FIREWORK_COLORS = ["#ff4040", "#ffd23f", "#3fd2ff", "#7dff5a", "#ff6ae6", "#ffffff", "#ff9a2e"];
     const LEVEL_COMPLETE_DIM_ALPHA = 0.55;
+    const LEVEL_COMPLETE_MIN_MS = 3000;
 
     // Start, death and level complete screens: the big word sits this far
     // above the middle and swells by PULSE_SHARE every PULSE_MS; lives and
@@ -782,9 +804,14 @@
 
     // Space, a tap, A or Start on the death or level complete screen: on to
     // the next level, the same level again with the score it began with, or
-    // a new game once the last life is gone
+    // a new game once the last life is gone. The level complete screen
+    // ignores presses for its first LEVEL_COMPLETE_MIN_MS, so the win
+    // can't be skipped by accident.
     function continueAfterPause() {
         if (isLevelComplete) {
+            if (performance.now() - levelCompleteMs < LEVEL_COMPLETE_MIN_MS) {
+                return;
+            }
             level++;
             levelStartScore = score;
             startLevel();
@@ -1226,7 +1253,7 @@
                 x = (x + bullet.vx * stepMs + worldCols) % worldCols;
                 y += bullet.vy * stepMs;
                 if (isWallAt(updated.walls, Math.floor(x), Math.floor(y))) {
-                    updated = splatOnWall(updated, wallKey(Math.floor(x), Math.floor(y)), lastX, lastY, nowMs);
+                    updated = splatOnWall(updated, wallKey(Math.floor(x), Math.floor(y)), bullet, lastX, lastY, nowMs);
                     isGone = true;
                     continue;
                 }
@@ -1251,16 +1278,25 @@
         return { maze: { ...updated, bullets: remainingBullets, splats }, points };
     }
 
-    // A bubble bursts on a wall: a splat where it hit, and the wall's rain
-    // starts fading to the next colour in MATRIX_PALETTE_RGBS
-    function splatOnWall(currentMaze, hitWallKey, x, y, nowMs) {
+    // A bubble flying at (vx, vy) bursts on a wall at (x, y): a splat in
+    // the air there, a splash mark left on the wall face it hit, and soon
+    // after, the wall's rain fading to the next colour in
+    // MATRIX_PALETTE_RGBS. The face is told apart the way the ray caster
+    // does it: which way it runs, which way the bubble was going, and how
+    // far along the face the mark sits.
+    function splatOnWall(currentMaze, hitWallKey, { vx, vy }, x, y, nowMs) {
         const lookIndex = currentMaze.wallLookIndexes.get(hitWallKey)?.toIndex ?? 0;
+        const isNorthSouthFace = vx !== 0;
+        let mark = { isNorthSouthFace, stepSign: Math.sign(vy), along: x - Math.floor(x) };
+        if (isNorthSouthFace) {
+            mark = { isNorthSouthFace, stepSign: Math.sign(vx), along: y - Math.floor(y) };
+        }
         return {
             ...currentMaze,
             splats: [...currentMaze.splats, { x, y, bornMs: nowMs }],
             wallLookIndexes: new Map([
                 ...currentMaze.wallLookIndexes,
-                [hitWallKey, { fromIndex: lookIndex, toIndex: (lookIndex + 1) % MATRIX_PALETTE_RGBS.length, changedMs: nowMs }],
+                [hitWallKey, { fromIndex: lookIndex, toIndex: (lookIndex + 1) % MATRIX_PALETTE_RGBS.length, changedMs: nowMs, mark }],
             ]),
         };
     }
@@ -2039,6 +2075,7 @@
                 hitAlong: hitAlong - Math.floor(hitAlong),
                 squareX,
                 squareY,
+                stepSign: isNorthSouthFace ? stepX : stepY,
             };
         }
         return null;
@@ -2047,8 +2084,8 @@
     // One screen column of Matrix rain wall: a 1-pixel-wide slice of the
     // rain picture in the wall's colour (fading to a new one if it was just
     // shot), scrolled down at this glyph column's own speed and dimmed by
-    // distance, with a dark seam where two wall squares meet
-    function drawWallColumn(column, { distance, isNorthSouthFace, hitAlong, squareX, squareY }, horizonY, wallLookIndexes, nowMs) {
+    // distance, with a green seam where two wall squares meet
+    function drawWallColumn(column, { distance, isNorthSouthFace, hitAlong, squareX, squareY, stepSign }, horizonY, wallLookIndexes, nowMs) {
         const wallHeight = VIEW_H / distance;
         const wallTop = horizonY - wallHeight / 2;
 
@@ -2066,7 +2103,7 @@
         }
 
         const look = wallLookIndexes.get(wallKey(squareX, squareY)) ?? { fromIndex: 0, toIndex: 0, changedMs: -Infinity };
-        const lookProgress = clamp((nowMs - look.changedMs) / WALL_LOOK_CHANGE_MS, 0, 1);
+        const lookProgress = clamp((nowMs - look.changedMs - WALL_LOOK_CHANGE_DELAY_MS) / WALL_LOOK_CHANGE_MS, 0, 1);
         const glyphColumn = Math.floor(hitAlong * MATRIX_COLUMNS_PER_WALL);
         const face = { squareX, squareY, isNorthSouthFace, glyphColumn };
         const rowsPerSecond = MATRIX_MIN_ROWS_PER_SECOND
@@ -2088,8 +2125,48 @@
         }
         ctx.globalAlpha = 1;
 
+        const { mark } = look;
+        const isMarkedFace = mark !== undefined && mark.isNorthSouthFace === isNorthSouthFace && mark.stepSign === stepSign;
+        if (isMarkedFace) {
+            drawShotMarkColumn(column, wallTop, wallHeight, hitAlong - mark.along, nowMs - look.changedMs);
+        }
+
         ctx.fillStyle = `rgba(0, 0, 0, ${1 - light})`;
         ctx.fillRect(column, wallTop, WALL_STRIP_OVERLAP_W, wallHeight);
+    }
+
+    // One column of the splash a bubble leaves on a wall, offsetAlong
+    // (in wall widths) from where it hit, ageMs after: a wobbly wet blob
+    // at bubble height with a dark dent in the middle and a few drips
+    // running down from it. It shows fully for a moment, then fades out
+    // by SHOT_MARK_MS while the wall changes colour.
+    function drawShotMarkColumn(column, wallTop, wallHeight, offsetAlong, ageMs) {
+        const distanceOut = Math.abs(offsetAlong);
+        if (ageMs >= SHOT_MARK_MS || distanceOut >= SHOT_MARK_RADIUS) {
+            return;
+        }
+        const fade = clamp((SHOT_MARK_MS - ageMs) / SHOT_MARK_FADE_MS, 0, 1);
+        const centerY = wallTop + wallHeight * (1 - BULLET_HEIGHT_SHARE);
+        const roundness = Math.sqrt(SHOT_MARK_RADIUS ** 2 - distanceOut ** 2);
+        const halfHeight = wallHeight * roundness * (1 + SHOT_MARK_WOBBLE * Math.sin(offsetAlong * 60));
+
+        ctx.globalAlpha = fade * SHOT_MARK_ALPHA;
+        ctx.fillStyle = SHOT_MARK_COLOR;
+        ctx.fillRect(column, centerY - halfHeight, WALL_STRIP_OVERLAP_W, halfHeight * 2);
+
+        // Drips, each running further down as the mark ages
+        const drip = SHOT_MARK_DRIPS.find(({ along }) => Math.abs(offsetAlong - along * SHOT_MARK_RADIUS) < SHOT_MARK_DRIP_HALF_WIDTH);
+        if (drip !== undefined) {
+            const dripLength = wallHeight * drip.length * clamp(ageMs / SHOT_MARK_DRIP_MS, 0.3, 1);
+            ctx.fillRect(column, centerY, WALL_STRIP_OVERLAP_W, halfHeight + dripLength);
+        }
+
+        if (distanceOut < SHOT_MARK_DENT_RADIUS) {
+            const dentHalfHeight = wallHeight * Math.sqrt(SHOT_MARK_DENT_RADIUS ** 2 - distanceOut ** 2);
+            ctx.fillStyle = SHOT_MARK_DENT_COLOR;
+            ctx.fillRect(column, centerY - dentHalfHeight, WALL_STRIP_OVERLAP_W, dentHalfHeight * 2);
+        }
+        ctx.globalAlpha = 1;
     }
 
     // The rain picture in one MATRIX_PALETTE_RGBS colour, drawn the first
@@ -2827,7 +2904,8 @@
     // Each chasing or frightened enemy within GUIDE_ENEMY_MAX_STEPS walking
     // steps gets an arrow pointing straight at it, as the crow flies (up
     // is straight ahead, down is behind), with its bug picture at the
-    // arrow's tail. The nearer it is, the bigger the arrow. Once only a few
+    // arrow's tail. A far bug's arrow is tiny and faint; it grows and
+    // brightens as the bug nears, and flashes once it is close. Once only a few
     // dots are left, a green arrow with a dot at its tail points the same
     // way at the nearest one by walking distance.
     function drawGuideArrows(currentMaze, camera, nowMs) {
@@ -2842,12 +2920,13 @@
             const { x, y } = centers[i];
             const turn = getTurnAngleToward(camera, getWrappedDeltaX(camera.x, x), y - camera.y);
             const nearness = 1 - steps / GUIDE_ENEMY_MAX_STEPS;
-            const size = GUIDE_ARROW_MIN_SIZE_PX + (GUIDE_ARROW_MAX_SIZE_PX - GUIDE_ARROW_MIN_SIZE_PX) * nearness;
+            const size = GUIDE_ARROW_MIN_SIZE_PX + (GUIDE_ARROW_MAX_SIZE_PX - GUIDE_ARROW_MIN_SIZE_PX) * nearness ** 2;
+            const iconW = GUIDE_BUG_ICON_MIN_W_PX + (GUIDE_BUG_ICON_MAX_W_PX - GUIDE_BUG_ICON_MIN_W_PX) * nearness ** 2;
             const sprite = getEnemySprite(getEnemyColor(currentMaze, i, nowMs), isEnemyFrightened(currentMaze, i, nowMs));
 
-            // A close bug's arrow blinks
-            const isClose = steps <= GUIDE_CLOSE_STEPS;
-            const isBlinkOff = isClose && Math.floor(nowMs / GUIDE_CLOSE_BLINK_MS) % 2 === 1;
+            // A close bug's arrow flashes
+            const isBlinkOff = steps <= GUIDE_CLOSE_STEPS && Math.floor(nowMs / GUIDE_CLOSE_BLINK_MS) % 2 === 1;
+            ctx.globalAlpha = GUIDE_FAR_ALPHA + (1 - GUIDE_FAR_ALPHA) * nearness;
             if (isBlinkOff) {
                 ctx.globalAlpha = GUIDE_CLOSE_BLINK_ALPHA;
             }
@@ -2857,10 +2936,8 @@
                 turn,
                 size,
                 getEnemyColor(currentMaze, i, nowMs),
-                (iconX, iconY) => {
-                    ctx.drawImage(sprite, iconX - GUIDE_BUG_ICON_W_PX / 2, iconY - GUIDE_BUG_ICON_W_PX * 3 / 8, GUIDE_BUG_ICON_W_PX, GUIDE_BUG_ICON_W_PX * 3 / 4);
-                    drawStepsBadge(iconX + GUIDE_BUG_ICON_W_PX / 2, iconY + GUIDE_BUG_ICON_W_PX / 4, steps, isClose);
-                },
+                iconW / 2 + 2,
+                (iconX, iconY) => ctx.drawImage(sprite, iconX - iconW / 2, iconY - iconW * 3 / 8, iconW, iconW * 3 / 4),
             );
             ctx.globalAlpha = 1;
         });
@@ -2879,7 +2956,7 @@
         const turn = getTurnAngleToward(camera, getWrappedDeltaX(camera.x, dotX + 0.5), dotY + 0.5 - camera.y);
         const ringX = VIEW_W / 2 + Math.sin(turn) * GUIDE_RING_RADIUS_X_PX;
         const ringY = VIEW_H / 2 - Math.cos(turn) * GUIDE_RING_RADIUS_Y_PX;
-        drawGuideArrow(ringX, ringY, turn, GUIDE_DOT_ARROW_SIZE_PX, DOT_COLOR, (iconX, iconY) => {
+        drawGuideArrow(ringX, ringY, turn, GUIDE_DOT_ARROW_SIZE_PX, DOT_COLOR, GUIDE_DOT_ICON_RADIUS_PX + 4, (iconX, iconY) => {
             ctx.fillStyle = DOT_COLOR;
             ctx.strokeStyle = "rgba(0, 0, 0, 0.8)";
             ctx.lineWidth = 2;
@@ -2890,27 +2967,6 @@
         });
     }
 
-    // A little round badge centred on (x, y) with how many steps away a bug
-    // is, red when it is close
-    function drawStepsBadge(x, y, steps, isClose) {
-        ctx.fillStyle = HUD_BACKGROUND_COLOR;
-        if (isClose) {
-            ctx.fillStyle = GUIDE_CLOSE_BADGE_COLOR;
-        }
-        ctx.strokeStyle = "#ffffff";
-        ctx.lineWidth = 1.5;
-        ctx.beginPath();
-        ctx.arc(x, y, GUIDE_BADGE_RADIUS_PX, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.stroke();
-        ctx.fillStyle = "#ffffff";
-        ctx.font = "bold 12px sans-serif";
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        ctx.fillText(String(steps), x, y + 0.5);
-        ctx.textBaseline = "alphabetic";
-    }
-
     // How far the guy would have to turn to face along (dx, dy): 0 straight
     // ahead, positive to his right, up to PI either way
     function getTurnAngleToward(camera, dx, dy) {
@@ -2919,9 +2975,9 @@
 
     // A filled arrowhead with a short tail, centred on (x, y), pointing
     // at angle (0 is up the screen, PI / 2 is right), edged in black, with
-    // drawIcon(x, y) called to draw what it points to just past its tail
-    function drawGuideArrow(x, y, angle, size, color, drawIcon) {
-        const iconReach = size + GUIDE_ICON_GAP_PX;
+    // drawIcon(x, y) called to draw what it points to, iconGap past its tail
+    function drawGuideArrow(x, y, angle, size, color, iconGap, drawIcon) {
+        const iconReach = size + iconGap;
         drawIcon(x - Math.sin(angle) * iconReach, y + Math.cos(angle) * iconReach);
 
         ctx.save();
@@ -3273,13 +3329,15 @@
     }
 
     // Level complete: the view dims, fireworks burst over it, a big word,
-    // and the button to go on
+    // and once LEVEL_COMPLETE_MIN_MS has passed, the button to go on
     function drawLevelComplete(nowMs) {
         ctx.fillStyle = `rgba(5, 8, 20, ${LEVEL_COMPLETE_DIM_ALPHA})`;
         ctx.fillRect(0, 0, VIEW_W, VIEW_H);
         drawFireworks(nowMs - levelCompleteMs);
         drawOverlayTitle("YOU WIN!", DOT_COLOR, nowMs);
-        drawContinueButton(CONTINUE_PROMPTS[lastInputKind], nowMs);
+        if (nowMs - levelCompleteMs >= LEVEL_COMPLETE_MIN_MS) {
+            drawContinueButton(CONTINUE_PROMPTS[lastInputKind], nowMs);
+        }
     }
 
     // Every burst still in the air at elapsedMs. Burst k goes off at
