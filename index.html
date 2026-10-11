@@ -195,39 +195,34 @@
     const MIN_LIGHT = 0.12;
     const MAX_RAY_STEPS = 80;
 
-    // Walls are code editor panels in Semgrep's navy and green: each wall
-    // face shows CODE_LINES_PER_WALL lines of made-up, syntax-coloured code,
-    // CODE_CHARS_PER_LINE characters wide, inside a thin green frame. Every
-    // line is a run of tokens (bars of colour) after an indent, and now and
-    // then a line is a finding, picked out with a red highlight. Faces
+    // Walls are Matrix-style green rain: each wall face is
+    // MATRIX_COLUMNS_PER_WALL columns by MATRIX_ROWS_PER_WALL rows of
+    // glyphs, with bright drops falling down every column at its own
+    // speed, between MIN and MAX rows a second. Squares are split by a
+    // thin dark seam, WALL_SEAM_SHARE of a square wide each side. Faces
     // running north-south are drawn a little darker, as if lit from one
     // side.
-    const SEMGREP_GREEN_RGB = [42, 207, 166];
-    const WALL_BASE_RGB = [20, 32, 52];
-    const WALL_FRAME_RGB = SEMGREP_GREEN_RGB;
-    const WALL_FRAME_SHARE = 0.03;
-    const FINDING_LINE_RGB = [120, 30, 40];
-    const FINDING_LINE_CHANCE = 0.08;
-    const BLANK_LINE_CHANCE = 0.15;
-    const CODE_TOKEN_RGBS = [
-        SEMGREP_GREEN_RGB,
-        [97, 175, 239],
-        [190, 150, 255],
-        [247, 150, 70],
-        [210, 220, 235],
-        [110, 125, 150],
-    ];
-    const CODE_LINES_PER_WALL = 9;
-    const CODE_CHARS_PER_LINE = 24;
-    const CODE_MAX_INDENT_CHARS = 8;
-    const CODE_TOKEN_HEIGHT_SHARE = 0.45;
+    const MATRIX_GLYPHS = "ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ0123456789Z:.=*+<>|";
+    const MATRIX_GREEN_RGB = [60, 255, 120];
+    const MATRIX_HEAD_COLOR = "#e0ffe8";
+    const MATRIX_BACKGROUND_RGB = [2, 12, 5];
+    const MATRIX_DIM_SHARE = 0.22;
+    const MATRIX_GLYPH_PX = 16;
+    const MATRIX_COLUMNS_PER_WALL = 8;
+    const MATRIX_ROWS_PER_WALL = 10;
+    const MATRIX_TILE_ROWS = 24;
+    const MATRIX_TRAIL_ROWS = 8;
+    const MATRIX_MIN_ROWS_PER_SECOND = 2;
+    const MATRIX_MAX_ROWS_PER_SECOND = 7;
+    const WALL_SEAM_RGB = [8, 50, 22];
+    const WALL_SEAM_SHARE = 0.015;
     const SIDE_WALL_SHADE = 0.72;
     const WALL_STRIP_OVERLAP_W = 1.05;
 
-    const CEILING_TOP_COLOR = "#03060d";
-    const CEILING_HORIZON_COLOR = "#0d1a2c";
-    const FLOOR_HORIZON_COLOR = "#081322";
-    const FLOOR_NEAR_COLOR = "#16314a";
+    const CEILING_TOP_COLOR = "#000000";
+    const CEILING_HORIZON_COLOR = "#04160b";
+    const FLOOR_HORIZON_COLOR = "#020c06";
+    const FLOOR_NEAR_COLOR = "#0d2a18";
 
     // Heights of things above the floor, as a share of wall height
     const DOT_HEIGHT_SHARE = 0.18;
@@ -1851,7 +1846,7 @@
 
         const camera = getCamera(maze, nowMs);
         drawCeilingAndFloor(camera);
-        const wallDepths = drawWalls(maze.walls, camera);
+        const wallDepths = drawWalls(maze.walls, camera, nowMs);
         drawWorldObjects(maze, camera, wallDepths, nowMs);
         drawBubbleBlaster(maze, camera, nowMs);
         drawCrosshair();
@@ -1913,10 +1908,10 @@
     }
 
     // Casts one ray per screen column through the grid and draws the wall
-    // it hits as a vertical strip of code panel. Returns each column's wall
-    // distance, so nearer things can be drawn in front and farther ones
-    // hidden behind.
-    function drawWalls(walls, camera) {
+    // it hits as a vertical strip of Matrix rain. Returns each column's
+    // wall distance, so nearer things can be drawn in front and farther
+    // ones hidden behind.
+    function drawWalls(walls, camera, nowMs) {
         const wallDepths = new Array(VIEW_W).fill(Infinity);
 
         for (let column = 0; column < VIEW_W; column++) {
@@ -1928,7 +1923,7 @@
                 continue;
             }
             wallDepths[column] = hit.distance;
-            drawWallColumn(column, hit, camera.horizonY);
+            drawWallColumn(column, hit, camera.horizonY, nowMs);
         }
 
         return wallDepths;
@@ -1989,13 +1984,12 @@
         return null;
     }
 
-    // One screen column of a code panel wall: the green frame, then each
-    // line's highlight and token colour at this point across the face, all
-    // dimmed by distance
-    function drawWallColumn(column, { distance, isNorthSouthFace, hitAlong, squareX, squareY }, horizonY) {
+    // One screen column of Matrix rain wall: a 1-pixel-wide slice of the
+    // rain picture, scrolled down at this glyph column's own speed and
+    // dimmed by distance, with a dark seam where two wall squares meet
+    function drawWallColumn(column, { distance, isNorthSouthFace, hitAlong, squareX, squareY }, horizonY, nowMs) {
         const wallHeight = VIEW_H / distance;
         const wallTop = horizonY - wallHeight / 2;
-        const lineHeight = wallHeight / CODE_LINES_PER_WALL;
 
         let light = clamp(1 - distance / FOG_DISTANCE_SQUARES, MIN_LIGHT, 1);
         if (isNorthSouthFace) {
@@ -2004,63 +1998,75 @@
 
         // Strips overlap a touch so no hairline gaps show between them once
         // the game is scaled to the window
-        const isFrameColumn = hitAlong < WALL_FRAME_SHARE || hitAlong > 1 - WALL_FRAME_SHARE;
-        if (isFrameColumn) {
-            ctx.fillStyle = toColor(WALL_FRAME_RGB, light);
+        if (hitAlong < WALL_SEAM_SHARE || hitAlong > 1 - WALL_SEAM_SHARE) {
+            ctx.fillStyle = toColor(WALL_SEAM_RGB, light);
             ctx.fillRect(column, wallTop, WALL_STRIP_OVERLAP_W, wallHeight);
             return;
         }
-        ctx.fillStyle = toColor(WALL_BASE_RGB, light);
+
+        const texture = getMatrixTexture();
+        const glyphColumn = Math.floor(hitAlong * MATRIX_COLUMNS_PER_WALL);
+        const face = { squareX, squareY, isNorthSouthFace, glyphColumn };
+        const rowsPerSecond = MATRIX_MIN_ROWS_PER_SECOND
+            + (MATRIX_MAX_ROWS_PER_SECOND - MATRIX_MIN_ROWS_PER_SECOND) * getWallRandom(face, 0);
+        const tileHeight = MATRIX_TILE_ROWS * MATRIX_GLYPH_PX;
+        const scrolled = getWallRandom(face, 1) * tileHeight - (nowMs / 1000) * rowsPerSecond * MATRIX_GLYPH_PX;
+        const sourceY = ((scrolled % tileHeight) + tileHeight) % tileHeight;
+        const sourceX = Math.min(texture.width - 1, Math.floor(hitAlong * texture.width));
+        ctx.drawImage(texture, sourceX, sourceY, 1, MATRIX_ROWS_PER_WALL * MATRIX_GLYPH_PX, column, wallTop, WALL_STRIP_OVERLAP_W, wallHeight);
+
+        ctx.fillStyle = `rgba(0, 0, 0, ${1 - light})`;
         ctx.fillRect(column, wallTop, WALL_STRIP_OVERLAP_W, wallHeight);
-
-        // Frame along the top and bottom of the panel
-        const frameHeight = wallHeight * WALL_FRAME_SHARE;
-        ctx.fillStyle = toColor(WALL_FRAME_RGB, light);
-        ctx.fillRect(column, wallTop, WALL_STRIP_OVERLAP_W, frameHeight);
-        ctx.fillRect(column, wallTop + wallHeight - frameHeight, WALL_STRIP_OVERLAP_W, frameHeight);
-
-        const charIndex = Math.floor(hitAlong * CODE_CHARS_PER_LINE);
-        for (let line = 1; line < CODE_LINES_PER_WALL - 1; line++) {
-            const lineTop = wallTop + line * lineHeight;
-            const face = { squareX, squareY, isNorthSouthFace, line };
-            if (getWallRandom(face, 0) < FINDING_LINE_CHANCE) {
-                ctx.fillStyle = toColor(FINDING_LINE_RGB, light);
-                ctx.fillRect(column, lineTop, WALL_STRIP_OVERLAP_W, lineHeight + 0.5);
-            }
-            const tokenRgb = getCodeTokenRgbAt(face, charIndex);
-            if (tokenRgb !== null) {
-                const tokenHeight = lineHeight * CODE_TOKEN_HEIGHT_SHARE;
-                ctx.fillStyle = toColor(tokenRgb, light);
-                ctx.fillRect(column, lineTop + (lineHeight - tokenHeight) / 2, WALL_STRIP_OVERLAP_W, tokenHeight);
-            }
-        }
     }
 
-    // The colour of the code token covering this character of one line of
-    // a wall face, or null for a space. Each line is an indent then tokens
-    // of 2 to 6 characters with a space between, out to its own length; a
-    // few lines are blank.
-    function getCodeTokenRgbAt(face, charIndex) {
-        if (getWallRandom(face, 1) < BLANK_LINE_CHANCE) {
-            return null;
+    // The rain picture, drawn once: MATRIX_COLUMNS_PER_WALL columns of
+    // random glyphs on near-black. Down each column, two bright drops run
+    // half a tile apart, each a white-green head with a green trail fading
+    // above it, over dim glyphs. The tile of MATRIX_TILE_ROWS rows is drawn
+    // twice, one under the other, so any window of a wall's height can be
+    // cut from it as it scrolls round.
+    let matrixTexture = null;
+    function getMatrixTexture() {
+        if (matrixTexture !== null) {
+            return matrixTexture;
         }
-        const indent = Math.floor(getWallRandom(face, 2) * (CODE_MAX_INDENT_CHARS / 2)) * 2;
-        const lineEnd = indent + 4 + Math.floor(getWallRandom(face, 3) * (CODE_CHARS_PER_LINE - indent - 5));
-        let tokenStart = indent + 1;
-        for (let token = 0; tokenStart <= Math.min(charIndex, lineEnd); token++) {
-            const tokenEnd = Math.min(lineEnd, tokenStart + 2 + Math.floor(getWallRandom(face, 10 + token) * 5));
-            if (charIndex < tokenEnd) {
-                return CODE_TOKEN_RGBS[Math.floor(getWallRandom(face, 40 + token) * CODE_TOKEN_RGBS.length)];
+        const glyph = MATRIX_GLYPH_PX;
+        const texture = document.createElement("canvas");
+        texture.width = MATRIX_COLUMNS_PER_WALL * glyph;
+        texture.height = 2 * MATRIX_TILE_ROWS * glyph;
+        const textureCtx = texture.getContext("2d");
+        textureCtx.fillStyle = toColor(MATRIX_BACKGROUND_RGB, 1);
+        textureCtx.fillRect(0, 0, texture.width, texture.height);
+        textureCtx.font = `bold ${glyph - 2}px monospace`;
+        textureCtx.textAlign = "center";
+        textureCtx.textBaseline = "middle";
+
+        const dropSpacing = MATRIX_TILE_ROWS / 2;
+        for (let column = 0; column < MATRIX_COLUMNS_PER_WALL; column++) {
+            const headRow = Math.floor(Math.random() * dropSpacing);
+            for (let row = 0; row < MATRIX_TILE_ROWS; row++) {
+                const char = MATRIX_GLYPHS[Math.floor(Math.random() * MATRIX_GLYPHS.length)];
+                const rowsBehindHead = (((headRow - row) % dropSpacing) + dropSpacing) % dropSpacing;
+                let color = toColor(MATRIX_GREEN_RGB, MATRIX_DIM_SHARE);
+                if (rowsBehindHead === 0) {
+                    color = MATRIX_HEAD_COLOR;
+                } else if (rowsBehindHead < MATRIX_TRAIL_ROWS) {
+                    color = toColor(MATRIX_GREEN_RGB, 1 - rowsBehindHead / MATRIX_TRAIL_ROWS * (1 - MATRIX_DIM_SHARE));
+                }
+                textureCtx.fillStyle = color;
+                for (const tile of [0, 1]) {
+                    textureCtx.fillText(char, (column + 0.5) * glyph, (tile * MATRIX_TILE_ROWS + row + 0.5) * glyph);
+                }
             }
-            tokenStart = tokenEnd + 1;
         }
-        return null;
+        matrixTexture = texture;
+        return matrixTexture;
     }
 
-    // A steady random number from 0 to 1 for one line of one wall face and
-    // one purpose (salt), so the code on each wall keeps its look
-    function getWallRandom({ squareX, squareY, isNorthSouthFace, line }, salt) {
-        let seed = squareX * 73856093 ^ squareY * 19349663 ^ line * 83492791 ^ salt * 2654435761;
+    // A steady random number from 0 to 1 for one glyph column of one wall
+    // face and one purpose (salt), so each column keeps its own rain
+    function getWallRandom({ squareX, squareY, isNorthSouthFace, glyphColumn }, salt) {
+        let seed = squareX * 73856093 ^ squareY * 19349663 ^ glyphColumn * 83492791 ^ salt * 2654435761;
         if (isNorthSouthFace) {
             seed ^= 0x5bd1e995;
         }
