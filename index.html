@@ -151,13 +151,16 @@
     // guy eat enemies for a while. Frightened enemies turn grey and wander
     // at random, flashing white near the end. An eaten or shot enemy fades
     // to a ghost and walks at double speed to the corner farthest from the
-    // guy, harmless and not edible, then goes back to normal.
+    // guy, harmless and not edible, then goes back to normal once it is
+    // there and has been a ghost for RETURNING_ENEMY_MIN_MS, so in small
+    // mazes it doesn't bounce straight back.
     const POWER_PELLET_POINTS = 50;
     const FRIGHTENED_DURATION_MS = 10000;
     const FRIGHTENED_FLASH_FINAL_MS = 3000;
     const FRIGHTENED_FLASH_PERIOD_MS = 250;
     const EATEN_ENEMY_POINTS = 200;
     const RETURNING_ENEMY_SPEEDUP = 2;
+    const RETURNING_ENEMY_MIN_MS = 8000;
 
     // ---- Dots, score ----
 
@@ -364,6 +367,21 @@
 
     const HUD_HEIGHT_PX = 56;
 
+    // Helper arrows (see drawGuideArrows): their size; how far in from the
+    // edge of the view the off-screen ones sit; how far down the side ones
+    // slide as an enemy gets more behind him; past what turn an enemy
+    // counts as behind, and how far apart the behind arrows sit. The dot
+    // arrow shows once DOT_GUIDE_MAX_LEFT or fewer dots and pellets are
+    // left.
+    const GUIDE_ARROW_SIZE_PX = 11;
+    const GUIDE_EDGE_MARGIN_PX = 24;
+    const GUIDE_EDGE_DROP_PX = 120;
+    const GUIDE_BEHIND_ANGLE = (3 * Math.PI) / 4;
+    const GUIDE_BEHIND_SPREAD_PX = 40;
+    const GUIDE_DOT_ARROW_SIZE_PX = 20;
+    const GUIDE_DOT_ARROW_Y_PX = 44;
+    const DOT_GUIDE_MAX_LEFT = 5;
+
     // When an enemy catches the guy the view floods with its colour, up to
     // DEATH_MAX_ALPHA solid, over DEATH_FADE_MS
     const DEATH_FADE_MS = 500;
@@ -440,6 +458,7 @@
     //   frightenedUntilMs   when the power runs out
     //   frightenedEnemyIndexes  enemies still frightened and edible
     //   returningEnemyCorners   eaten or shot enemies walking back (index -> [x, y])
+    //   returningEnemyUntilMs   earliest each of those may stop being a ghost
     //   bullets             { x, y, vx, vy, lastMs } in squares, velocity in
     //                       squares per ms
     let maze = null;
@@ -781,6 +800,7 @@
             frightenedUntilMs: -Infinity,
             frightenedEnemyIndexes: new Set(),
             returningEnemyCorners: new Map(),
+            returningEnemyUntilMs: new Map(),
             bullets: [],
         };
     }
@@ -1164,7 +1184,7 @@
                 ));
                 if (hitIndex !== -1) {
                     points += SHOT_ENEMY_POINTS;
-                    updated = sendEnemyHome(updated, hitIndex);
+                    updated = sendEnemyHome(updated, hitIndex, nowMs);
                     isGone = true;
                 }
             }
@@ -1222,7 +1242,7 @@
             }
             if (isEnemyFrightened(updated, i, nowMs)) {
                 points += EATEN_ENEMY_POINTS;
-                updated = sendEnemyHome(updated, i);
+                updated = sendEnemyHome(updated, i, nowMs);
                 continue;
             }
             return { maze: updated, points, isCaught: true, catcherIndex: i };
@@ -1243,14 +1263,19 @@
     }
 
     // The maze with this enemy no longer frightened and walking back to
-    // the corner farthest from the guy
-    function sendEnemyHome(currentMaze, enemyIndex) {
+    // the corner farthest from the guy, staying a ghost for at least
+    // RETURNING_ENEMY_MIN_MS
+    function sendEnemyHome(currentMaze, enemyIndex, nowMs) {
         return {
             ...currentMaze,
             frightenedEnemyIndexes: new Set([...currentMaze.frightenedEnemyIndexes].filter((i) => i !== enemyIndex)),
             returningEnemyCorners: new Map([
                 ...currentMaze.returningEnemyCorners,
                 [enemyIndex, getFarthestFreeCorner(currentMaze, enemyIndex)],
+            ]),
+            returningEnemyUntilMs: new Map([
+                ...currentMaze.returningEnemyUntilMs,
+                [enemyIndex, nowMs + RETURNING_ENEMY_MIN_MS],
             ]),
         };
     }
@@ -1357,12 +1382,16 @@
             return { fromX, fromY, startMs: nowMs, durationMs };
         });
 
-        // Returning enemies that have reached their corner are back to normal
+        // Returning enemies that have reached their corner, and been ghosts
+        // long enough, are back to normal; until then they wait there
         const returningEnemyCorners = new Map([...currentMaze.returningEnemyCorners].filter(([i, [cornerX, cornerY]]) => (
             movedEnemies[i][0] !== cornerX || movedEnemies[i][1] !== cornerY
+            || nowMs < currentMaze.returningEnemyUntilMs.get(i)
         )));
+        const returningEnemyUntilMs = new Map([...currentMaze.returningEnemyUntilMs]
+            .filter(([i]) => returningEnemyCorners.has(i)));
 
-        return { ...currentMaze, enemies: movedEnemies, enemySlides, returningEnemyCorners };
+        return { ...currentMaze, enemies: movedEnemies, enemySlides, returningEnemyCorners, returningEnemyUntilMs };
     }
 
     // The neighbouring square that is closest by the given walking
@@ -1813,6 +1842,7 @@
         drawWorldObjects(maze, camera, wallDepths, nowMs);
         drawBubbleBlaster(maze, camera, nowMs);
         drawCrosshair();
+        drawGuideArrows(maze, camera, nowMs);
         drawMinimap(maze, nowMs);
         drawStatusBar(nowMs);
 
@@ -2655,6 +2685,103 @@
     function normalizeVector(vector) {
         const length = Math.hypot(...vector) || 1;
         return vector.map((value) => value / length);
+    }
+
+    // Helper arrows for young players. Each chasing or frightened enemy in
+    // front of the guy gets a small arrow over its head in its colour, shown
+    // even through walls; one out of sight gets an arrow at the side of the
+    // view (or the bottom left, if it is behind him) pointing the way to
+    // turn.
+    // Once only a few dots are left, a green arrow at the top of the view
+    // points the way to walk to reach the nearest one.
+    function drawGuideArrows(currentMaze, camera, nowMs) {
+        getEnemyCenters(currentMaze, nowMs).forEach(({ x, y }, i) => {
+            if (currentMaze.returningEnemyCorners.has(i)) {
+                return;
+            }
+            const color = getEnemyColor(currentMaze, i, nowMs);
+            const view = projectPoint(camera, x, y);
+            if (view !== null && view.screenX >= 0 && view.screenX <= VIEW_W) {
+                const headY = camera.horizonY + view.unitPx / 2 - ENEMY_HEIGHT_SHARE * view.unitPx;
+                const arrowY = Math.max(GUIDE_ARROW_SIZE_PX, headY - GUIDE_ARROW_SIZE_PX * 1.5);
+                drawGuideArrow(view.screenX, arrowY, Math.PI, GUIDE_ARROW_SIZE_PX, color);
+                return;
+            }
+
+            const turn = getTurnAngleToward(camera, getWrappedDeltaX(camera.x, x), y - camera.y);
+            if (Math.abs(turn) > GUIDE_BEHIND_ANGLE) {
+                // Left of middle, clear of the blaster
+                const behindX = VIEW_W * 0.35 + Math.sign(turn) * GUIDE_BEHIND_SPREAD_PX;
+                drawGuideArrow(behindX, VIEW_H - GUIDE_EDGE_MARGIN_PX, Math.PI, GUIDE_ARROW_SIZE_PX, color);
+                return;
+            }
+            const edgeX = turn > 0 ? VIEW_W - GUIDE_EDGE_MARGIN_PX : GUIDE_EDGE_MARGIN_PX;
+            const lowerBy = (Math.abs(turn) - FIELD_OF_VIEW_RADIANS / 2) / (GUIDE_BEHIND_ANGLE - FIELD_OF_VIEW_RADIANS / 2);
+            const edgeY = VIEW_H / 2 + clamp(lowerBy, 0, 1) * GUIDE_EDGE_DROP_PX;
+            drawGuideArrow(edgeX, edgeY, Math.sign(turn) * Math.PI / 2, GUIDE_ARROW_SIZE_PX, color);
+        });
+
+        const dotsLeft = currentMaze.dots.size + currentMaze.powerPellets.size;
+        if (dotsLeft === 0 || dotsLeft > DOT_GUIDE_MAX_LEFT) {
+            return;
+        }
+        const step = getStepTowardNearestDot(currentMaze);
+        if (step === null) {
+            return;
+        }
+        const turn = getTurnAngleToward(camera, step[0], step[1]);
+        drawGuideArrow(VIEW_W / 2, GUIDE_DOT_ARROW_Y_PX, turn, GUIDE_DOT_ARROW_SIZE_PX, DOT_COLOR);
+    }
+
+    // How far the guy would have to turn to face along (dx, dy): 0 straight
+    // ahead, positive to his right, up to PI either way
+    function getTurnAngleToward(camera, dx, dy) {
+        return Math.atan2(camera.dirX * dy - camera.dirY * dx, camera.dirX * dx + camera.dirY * dy);
+    }
+
+    // The [dx, dy] of the guy's first step along the shortest walk to the
+    // nearest dot or pellet, or null if none can be reached
+    function getStepTowardNearestDot(currentMaze) {
+        const [guySqX, guySqY] = getGuySquare(currentMaze);
+        const distancesFromGuy = getPathDistances(currentMaze.walls, guySqX, guySqY);
+        const nearest = [...currentMaze.dots, ...currentMaze.powerPellets]
+            .filter((key) => distancesFromGuy.has(key))
+            .sort((a, b) => distancesFromGuy.get(a) - distancesFromGuy.get(b))[0];
+        if (nearest === undefined) {
+            return null;
+        }
+        const [dotX, dotY] = nearest.split(",").map(Number);
+        const distancesFromDot = getPathDistances(currentMaze.walls, dotX, dotY);
+        const guyDistance = distancesFromDot.get(wallKey(guySqX, guySqY));
+        const direction = STEP_DIRECTIONS.find(([dx, dy]) => {
+            const next = getStepDestination(currentMaze.walls, guySqX, guySqY, dx, dy);
+            return next !== null && distancesFromDot.get(wallKey(next[0], next[1])) < guyDistance;
+        });
+        return direction ?? null;
+    }
+
+    // A filled arrowhead with a short tail, centred on (x, y), pointing
+    // at angle (0 is up the screen, PI / 2 is right), edged in black
+    function drawGuideArrow(x, y, angle, size, color) {
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(angle);
+        ctx.beginPath();
+        ctx.moveTo(0, -size);
+        ctx.lineTo(size, 0);
+        ctx.lineTo(size * 0.4, 0);
+        ctx.lineTo(size * 0.4, size);
+        ctx.lineTo(-size * 0.4, size);
+        ctx.lineTo(-size * 0.4, 0);
+        ctx.lineTo(-size, 0);
+        ctx.closePath();
+        ctx.lineJoin = "round";
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = "rgba(0, 0, 0, 0.8)";
+        ctx.stroke();
+        ctx.fillStyle = color;
+        ctx.fill();
+        ctx.restore();
     }
 
     function drawCrosshair() {
