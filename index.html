@@ -218,26 +218,47 @@
     const WALL_LOOK_CHANGE_DELAY_MS = 1500;
     const WALL_LOOK_CHANGE_MS = 3000;
 
-    // The splash mark: its size in wall widths, how much its edge wobbles,
-    // the dark dent in its middle, and its drips (where across the mark,
-    // as a share of its radius, and how far down, in wall heights). It
-    // lasts SHOT_MARK_MS, fading over the last SHOT_MARK_FADE_MS, and the
-    // drips reach full length by SHOT_MARK_DRIP_MS.
-    const SHOT_MARK_RADIUS = 0.17;
-    const SHOT_MARK_WOBBLE = 0.2;
-    const SHOT_MARK_DENT_RADIUS = 0.05;
-    const SHOT_MARK_COLOR = "rgb(200, 255, 240)";
-    const SHOT_MARK_DENT_COLOR = "rgb(10, 30, 25)";
-    const SHOT_MARK_ALPHA = 0.85;
-    const SHOT_MARK_DRIPS = [
-        { along: -0.6, length: 0.12 },
-        { along: -0.1, length: 0.22 },
-        { along: 0.45, length: 0.16 },
+    // The splash mark, painted on the wall (see drawShotMarkColumn). It is
+    // a cluster of round blobs: a lumpy middle and droplets flung round
+    // it, each given as across and down from the hit point and a radius,
+    // all in units of SHOT_MARK_SCALE wall widths. Drips run down from it
+    // (where across, and how far down in wall heights). A pale core and a
+    // dark dent sit in the middle. The mark bursts out to full size over
+    // SHOT_MARK_GROW_MS, drips reach full length by SHOT_MARK_DRIP_MS, and
+    // it is gone by SHOT_MARK_MS, fading over the last SHOT_MARK_FADE_MS.
+    const SHOT_MARK_SCALE = 0.15;
+    const SHOT_MARK_BLOBS = [
+        { across: 0, down: 0, radius: 0.8 },
+        { across: 0.55, down: 0.35, radius: 0.6 },
+        { across: -0.5, down: 0.3, radius: 0.55 },
+        { across: 0.2, down: -0.55, radius: 0.55 },
+        { across: -0.4, down: -0.45, radius: 0.5 },
+        { across: 1.25, down: -0.35, radius: 0.22 },
+        { across: -1.2, down: 0.2, radius: 0.25 },
+        { across: 0.5, down: 1.15, radius: 0.2 },
+        { across: -0.6, down: -1.1, radius: 0.18 },
+        { across: 1.5, down: 0.6, radius: 0.12 },
+        { across: -1.55, down: -0.55, radius: 0.1 },
+        { across: 0.1, down: -1.45, radius: 0.12 },
+        { across: 0.95, down: -1.0, radius: 0.15 },
     ];
-    const SHOT_MARK_DRIP_HALF_WIDTH = 0.012;
+    const SHOT_MARK_REACH = 1.7;
+    const SHOT_MARK_DRIPS = [
+        { across: -0.55, length: 0.14 },
+        { across: 0.05, length: 0.26 },
+        { across: 0.5, length: 0.18 },
+    ];
+    const SHOT_MARK_DRIP_HALF_WIDTH = 0.1;
+    const SHOT_MARK_CORE_SHARE = 0.5;
+    const SHOT_MARK_DENT_RADIUS = 0.25;
+    const SHOT_MARK_COLOR = "rgb(90, 220, 190)";
+    const SHOT_MARK_CORE_COLOR = "rgb(215, 255, 245)";
+    const SHOT_MARK_DENT_COLOR = "rgb(10, 40, 32)";
+    const SHOT_MARK_ALPHA = 0.85;
+    const SHOT_MARK_GROW_MS = 140;
+    const SHOT_MARK_DRIP_MS = 1500;
     const SHOT_MARK_MS = 4500;
     const SHOT_MARK_FADE_MS = 1500;
-    const SHOT_MARK_DRIP_MS = 1200;
     const MATRIX_HEAD_WHITENESS = 0.8;
     const MATRIX_BACKGROUND_RGB = [2, 12, 5];
     const MATRIX_DIM_SHARE = 0.22;
@@ -324,14 +345,6 @@
     const BUBBLE_EDGE_COLOR = "rgba(220, 255, 245, 0.95)";
     const BUBBLE_SHINE_COLOR = "rgba(255, 255, 255, 0.9)";
     const BUBBLE_START_AHEAD_SQUARES = 0.3;
-
-    // A bubble that hits a wall bursts in a splat lasting SPLAT_MS, its
-    // droplets flying out SPLAT_REACH and falling SPLAT_FALL bubble radii
-    const SPLAT_MS = 450;
-    const SPLAT_DROPLET_COUNT = 10;
-    const SPLAT_REACH = 1.6;
-    const SPLAT_FALL = 1.2;
-    const SPLAT_WALL_SLACK_SQUARES = 0.2;
 
     // A new bubble is drawn coming out of the blaster's nozzle: for its
     // first BUBBLE_LAUNCH_MS it glides from the tip, where it is
@@ -525,7 +538,6 @@
     //   returningEnemyCorners   eaten or shot enemies walking back (index -> [x, y])
     //   returningEnemyUntilMs   earliest each of those may stop being a ghost
     //   startingDotCount    dots and pellets the level began with
-    //   splats              { x, y, bornMs } where bubbles burst on walls
     //   wallLookIndexes     walls that have been shot ("x,y" -> the colours
     //                       it is fading between, as MATRIX_PALETTE_RGBS
     //                       indexes, and when the fade began)
@@ -877,7 +889,6 @@
             returningEnemyCorners: new Map(),
             returningEnemyUntilMs: new Map(),
             bullets: [],
-            splats: [],
             wallLookIndexes: new Map(),
             startingDotCount: dots.size + powerPellets.size,
         };
@@ -1274,13 +1285,12 @@
             }
         }
 
-        const splats = updated.splats.filter(({ bornMs }) => nowMs - bornMs < SPLAT_MS);
-        return { maze: { ...updated, bullets: remainingBullets, splats }, points };
+        return { maze: { ...updated, bullets: remainingBullets }, points };
     }
 
-    // A bubble flying at (vx, vy) bursts on a wall at (x, y): a splat in
-    // the air there, a splash mark left on the wall face it hit, and soon
-    // after, the wall's rain fading to the next colour in
+    // A bubble flying at (vx, vy) bursts on a wall at (x, y): a splash
+    // mark on the wall face it hit, and soon after, the wall's rain fading
+    // to the next colour in
     // MATRIX_PALETTE_RGBS. The face is told apart the way the ray caster
     // does it: which way it runs, which way the bubble was going, and how
     // far along the face the mark sits.
@@ -1293,7 +1303,6 @@
         }
         return {
             ...currentMaze,
-            splats: [...currentMaze.splats, { x, y, bornMs: nowMs }],
             wallLookIndexes: new Map([
                 ...currentMaze.wallLookIndexes,
                 [hitWallKey, { fromIndex: lookIndex, toIndex: (lookIndex + 1) % MATRIX_PALETTE_RGBS.length, changedMs: nowMs, mark }],
@@ -2136,37 +2145,62 @@
     }
 
     // One column of the splash a bubble leaves on a wall, offsetAlong
-    // (in wall widths) from where it hit, ageMs after: a wobbly wet blob
-    // at bubble height with a dark dent in the middle and a few drips
-    // running down from it. It shows fully for a moment, then fades out
-    // by SHOT_MARK_MS while the wall changes colour.
+    // (in wall widths) from where it hit, ageMs after. The blobs and drips
+    // covering this column are merged into runs and each run is filled
+    // once, so overlaps don't show darker; then the pale core and the dark
+    // dent go on top the same way. Everything is round in wall units, so
+    // the mark keeps its shape in perspective like the glyphs do.
     function drawShotMarkColumn(column, wallTop, wallHeight, offsetAlong, ageMs) {
-        const distanceOut = Math.abs(offsetAlong);
-        if (ageMs >= SHOT_MARK_MS || distanceOut >= SHOT_MARK_RADIUS) {
+        if (ageMs >= SHOT_MARK_MS || Math.abs(offsetAlong) >= SHOT_MARK_SCALE * SHOT_MARK_REACH) {
             return;
         }
-        const fade = clamp((SHOT_MARK_MS - ageMs) / SHOT_MARK_FADE_MS, 0, 1);
+        const growth = 1 - (1 - clamp(ageMs / SHOT_MARK_GROW_MS, 0, 1)) ** 3;
+        const scale = SHOT_MARK_SCALE * growth;
+        const across = offsetAlong / scale;
         const centerY = wallTop + wallHeight * (1 - BULLET_HEIGHT_SHARE);
-        const roundness = Math.sqrt(SHOT_MARK_RADIUS ** 2 - distanceOut ** 2);
-        const halfHeight = wallHeight * roundness * (1 + SHOT_MARK_WOBBLE * Math.sin(offsetAlong * 60));
+        const unitPx = wallHeight * scale;
 
-        ctx.globalAlpha = fade * SHOT_MARK_ALPHA;
-        ctx.fillStyle = SHOT_MARK_COLOR;
-        ctx.fillRect(column, centerY - halfHeight, WALL_STRIP_OVERLAP_W, halfHeight * 2);
+        const dripShare = clamp(ageMs / SHOT_MARK_DRIP_MS, 0, 1);
+        const dripRuns = SHOT_MARK_DRIPS
+            .filter((drip) => Math.abs(across - drip.across) < SHOT_MARK_DRIP_HALF_WIDTH)
+            .map((drip) => [0, (drip.length * dripShare) / scale]);
 
-        // Drips, each running further down as the mark ages
-        const drip = SHOT_MARK_DRIPS.find(({ along }) => Math.abs(offsetAlong - along * SHOT_MARK_RADIUS) < SHOT_MARK_DRIP_HALF_WIDTH);
-        if (drip !== undefined) {
-            const dripLength = wallHeight * drip.length * clamp(ageMs / SHOT_MARK_DRIP_MS, 0.3, 1);
-            ctx.fillRect(column, centerY, WALL_STRIP_OVERLAP_W, halfHeight + dripLength);
-        }
-
-        if (distanceOut < SHOT_MARK_DENT_RADIUS) {
-            const dentHalfHeight = wallHeight * Math.sqrt(SHOT_MARK_DENT_RADIUS ** 2 - distanceOut ** 2);
-            ctx.fillStyle = SHOT_MARK_DENT_COLOR;
-            ctx.fillRect(column, centerY - dentHalfHeight, WALL_STRIP_OVERLAP_W, dentHalfHeight * 2);
+        ctx.globalAlpha = clamp((SHOT_MARK_MS - ageMs) / SHOT_MARK_FADE_MS, 0, 1) * SHOT_MARK_ALPHA;
+        const layers = [
+            { color: SHOT_MARK_COLOR, runs: [...getBlobRuns(SHOT_MARK_BLOBS, across, 1), ...dripRuns] },
+            { color: SHOT_MARK_CORE_COLOR, runs: getBlobRuns(SHOT_MARK_BLOBS.slice(0, 5), across, SHOT_MARK_CORE_SHARE) },
+            { color: SHOT_MARK_DENT_COLOR, runs: getBlobRuns([{ across: 0, down: 0, radius: SHOT_MARK_DENT_RADIUS }], across, 1) },
+        ];
+        for (const { color, runs } of layers) {
+            ctx.fillStyle = color;
+            for (const [top, bottom] of mergeRuns(runs)) {
+                ctx.fillRect(column, centerY + top * unitPx, WALL_STRIP_OVERLAP_W, (bottom - top) * unitPx);
+            }
         }
         ctx.globalAlpha = 1;
+    }
+
+    // The [top, bottom] each round blob covers at this distance across,
+    // with the blobs shrunk by shrink towards the middle
+    function getBlobRuns(blobs, across, shrink) {
+        return blobs
+            .map(({ across: blobAcross, down, radius }) => {
+                const halfHeight = Math.sqrt(Math.max(0, (radius * shrink) ** 2 - (across - blobAcross * shrink) ** 2));
+                return [down * shrink - halfHeight, down * shrink + halfHeight];
+            })
+            .filter(([top, bottom]) => bottom > top);
+    }
+
+    // Overlapping [top, bottom] runs joined into one, sorted top first
+    function mergeRuns(runs) {
+        const sorted = [...runs].sort((a, b) => a[0] - b[0]);
+        return sorted.reduce((merged, [top, bottom]) => {
+            const last = merged[merged.length - 1];
+            if (last !== undefined && top <= last[1]) {
+                return [...merged.slice(0, -1), [last[0], Math.max(last[1], bottom)]];
+            }
+            return [...merged, [top, bottom]];
+        }, []);
     }
 
     // The rain picture in one MATRIX_PALETTE_RGBS colour, drawn the first
@@ -2265,9 +2299,6 @@
             const [x, y] = key.split(",").map(Number);
             objects.push({ x: x + 0.5, y: y + 0.5, kind: "pellet" });
         }
-        for (const { x, y, bornMs } of currentMaze.splats) {
-            objects.push({ x, y, kind: "splat", bornMs });
-        }
         // Bubbles still coming out of the nozzle are drawn with the blaster
         for (const { x, y, bornMs } of currentMaze.bullets) {
             if (nowMs - bornMs >= BUBBLE_LAUNCH_MS) {
@@ -2292,10 +2323,6 @@
                 drawWorldBubble(view, camera, wallDepths);
                 continue;
             }
-            if (object.kind === "splat") {
-                drawSplat(view, camera, wallDepths, (nowMs - object.bornMs) / SPLAT_MS);
-                continue;
-            }
             if (object.kind === "pellet") {
                 drawWorldPellet(view, camera, wallDepths, nowMs);
                 continue;
@@ -2313,39 +2340,6 @@
         }
         const { x, y, radius } = getWorldBubbleOnScreen(view, camera);
         drawBubble(x, y, radius, 1);
-    }
-
-    // A bubble bursting on a wall, progress going 0 to 1 over SPLAT_MS: a
-    // flat blob that fades, with SPLAT_DROPLET_COUNT droplets flying out
-    // round it and falling a little. The splat sits just in front of the
-    // wall, so it is hidden only by a wall nearer than that one.
-    function drawSplat(view, camera, wallDepths, progress) {
-        const column = Math.round(view.screenX);
-        if (column < 0 || column >= VIEW_W || wallDepths[column] < view.depth - SPLAT_WALL_SLACK_SQUARES) {
-            return;
-        }
-        const { x, y, radius } = getWorldBubbleOnScreen(view, camera);
-        const fade = 1 - progress;
-
-        ctx.globalAlpha = fade;
-        ctx.fillStyle = BUBBLE_FILL_COLOR;
-        ctx.strokeStyle = BUBBLE_EDGE_COLOR;
-        ctx.lineWidth = Math.max(1, radius * 0.12);
-        ctx.beginPath();
-        ctx.ellipse(x, y, radius * (1 + progress * 0.8), radius * (0.7 + progress * 0.3), 0, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.stroke();
-
-        ctx.fillStyle = BUBBLE_EDGE_COLOR;
-        for (let droplet = 0; droplet < SPLAT_DROPLET_COUNT; droplet++) {
-            const angle = (droplet / SPLAT_DROPLET_COUNT) * Math.PI * 2;
-            const reach = radius * (1 + progress * SPLAT_REACH);
-            const fall = radius * progress * progress * SPLAT_FALL;
-            ctx.beginPath();
-            ctx.arc(x + Math.cos(angle) * reach, y + Math.sin(angle) * reach + fall, Math.max(1, radius * 0.18 * fade), 0, Math.PI * 2);
-            ctx.fill();
-        }
-        ctx.globalAlpha = 1;
     }
 
     // A power pellet floating over the floor, pulsing gently so it catches
