@@ -361,26 +361,27 @@
     const MAP_DOT_RADIUS_PX = 3;
     const MAP_PELLET_RADIUS_PX = 7;
     const MAP_GUY_COLORS = { left: "red", top: ["blue", "green"], right: "orange" };
-    const MAP_RETURNING_ENEMY_OUTLINE_COLOR = "rgba(160, 160, 160, 0.55)";
-    const MAP_OUTLINE_WIDTH_PX = 3;
+    const MAP_ENEMY_SCALE = 1.5;
     const MAP_FACING_WEDGE_COLOR = "#ffffff";
 
     const HUD_HEIGHT_PX = 56;
 
-    // Helper arrows (see drawGuideArrows): their size; how far in from the
-    // edge of the view the off-screen ones sit; how far down the side ones
-    // slide as an enemy gets more behind him; past what turn an enemy
-    // counts as behind, and how far apart the behind arrows sit. The dot
-    // arrow shows once DOT_GUIDE_MAX_LEFT or fewer dots and pellets are
-    // left.
-    const GUIDE_ARROW_SIZE_PX = 11;
-    const GUIDE_EDGE_MARGIN_PX = 24;
-    const GUIDE_EDGE_DROP_PX = 120;
-    const GUIDE_BEHIND_ANGLE = (3 * Math.PI) / 4;
-    const GUIDE_BEHIND_SPREAD_PX = 40;
-    const GUIDE_DOT_ARROW_SIZE_PX = 20;
-    const GUIDE_DOT_ARROW_Y_PX = 44;
-    const DOT_GUIDE_MAX_LEFT = 5;
+    // Helper arrows (see drawGuideArrows): enemy arrows show within
+    // GUIDE_ENEMY_MAX_STEPS walking steps, on an oval this far out from
+    // the crosshair, growing from MIN to MAX size as the enemy nears; the
+    // icon at each arrow's tail sits GAP past it. The dot arrow shows once
+    // DOT_GUIDE_MAX_LEFT or fewer dots and pellets are left, on the same
+    // oval.
+    const GUIDE_ENEMY_MAX_STEPS = 10;
+    const GUIDE_RING_RADIUS_X_PX = 170;
+    const GUIDE_RING_RADIUS_Y_PX = 150;
+    const GUIDE_ARROW_MIN_SIZE_PX = 9;
+    const GUIDE_ARROW_MAX_SIZE_PX = 18;
+    const GUIDE_ICON_GAP_PX = 14;
+    const GUIDE_BUG_ICON_W_PX = 30;
+    const GUIDE_DOT_ICON_RADIUS_PX = 7;
+    const GUIDE_DOT_ARROW_SIZE_PX = 16;
+    const DOT_GUIDE_MAX_LEFT = 4;
 
     // When an enemy catches the guy the view floods with its colour, up to
     // DEATH_MAX_ALPHA solid, over DEATH_FADE_MS
@@ -2263,6 +2264,7 @@
             }
             ctx.drawImage(sprite, sourceX, 0, 1, sprite.height, column, top, 1, height);
         }
+        ctx.imageSmoothingEnabled = true;
         ctx.globalAlpha = 1;
     }
 
@@ -2699,50 +2701,60 @@
         return vector.map((value) => value / length);
     }
 
-    // Helper arrows for young players. Each chasing or frightened enemy in
-    // front of the guy gets a small arrow over its head in its colour, shown
-    // even through walls; one out of sight gets an arrow at the side of the
-    // view (or the bottom left, if it is behind him) pointing the way to
-    // turn.
-    // Once only a few dots are left, a green arrow at the top of the view
-    // points the way to walk to reach the nearest one.
+    // Helper arrows for young players, like a compass round the crosshair.
+    // Each chasing or frightened enemy within GUIDE_ENEMY_MAX_STEPS walking
+    // steps gets an arrow pointing straight at it, as the crow flies (up
+    // is straight ahead, down is behind), with its bug picture at the
+    // arrow's tail. The nearer it is, the bigger the arrow. Once only a few
+    // dots are left, a green arrow with a dot at its tail points the same
+    // way at the nearest one by walking distance.
     function drawGuideArrows(currentMaze, camera, nowMs) {
-        getEnemyCenters(currentMaze, nowMs).forEach(({ x, y }, i) => {
-            if (currentMaze.returningEnemyCorners.has(i)) {
+        const [guySqX, guySqY] = getGuySquare(currentMaze);
+        const distancesFromGuy = getPathDistances(currentMaze.walls, guySqX, guySqY);
+        const centers = getEnemyCenters(currentMaze, nowMs);
+        currentMaze.enemies.forEach(([squareX, squareY], i) => {
+            const steps = distancesFromGuy.get(wallKey(squareX, squareY));
+            if (currentMaze.returningEnemyCorners.has(i) || steps === undefined || steps > GUIDE_ENEMY_MAX_STEPS) {
                 return;
             }
-            const color = getEnemyColor(currentMaze, i, nowMs);
-            const view = projectPoint(camera, x, y);
-            if (view !== null && view.screenX >= 0 && view.screenX <= VIEW_W) {
-                const headY = camera.horizonY + view.unitPx / 2 - ENEMY_HEIGHT_SHARE * view.unitPx;
-                const arrowY = Math.max(GUIDE_ARROW_SIZE_PX, headY - GUIDE_ARROW_SIZE_PX * 1.5);
-                drawGuideArrow(view.screenX, arrowY, Math.PI, GUIDE_ARROW_SIZE_PX, color);
-                return;
-            }
-
+            const { x, y } = centers[i];
             const turn = getTurnAngleToward(camera, getWrappedDeltaX(camera.x, x), y - camera.y);
-            if (Math.abs(turn) > GUIDE_BEHIND_ANGLE) {
-                // Left of middle, clear of the blaster
-                const behindX = VIEW_W * 0.35 + Math.sign(turn) * GUIDE_BEHIND_SPREAD_PX;
-                drawGuideArrow(behindX, VIEW_H - GUIDE_EDGE_MARGIN_PX, Math.PI, GUIDE_ARROW_SIZE_PX, color);
-                return;
-            }
-            const edgeX = turn > 0 ? VIEW_W - GUIDE_EDGE_MARGIN_PX : GUIDE_EDGE_MARGIN_PX;
-            const lowerBy = (Math.abs(turn) - FIELD_OF_VIEW_RADIANS / 2) / (GUIDE_BEHIND_ANGLE - FIELD_OF_VIEW_RADIANS / 2);
-            const edgeY = VIEW_H / 2 + clamp(lowerBy, 0, 1) * GUIDE_EDGE_DROP_PX;
-            drawGuideArrow(edgeX, edgeY, Math.sign(turn) * Math.PI / 2, GUIDE_ARROW_SIZE_PX, color);
+            const nearness = 1 - steps / GUIDE_ENEMY_MAX_STEPS;
+            const size = GUIDE_ARROW_MIN_SIZE_PX + (GUIDE_ARROW_MAX_SIZE_PX - GUIDE_ARROW_MIN_SIZE_PX) * nearness;
+            const sprite = getEnemySprite(getEnemyColor(currentMaze, i, nowMs), isEnemyFrightened(currentMaze, i, nowMs));
+            drawGuideArrow(
+                VIEW_W / 2 + Math.sin(turn) * GUIDE_RING_RADIUS_X_PX,
+                VIEW_H / 2 - Math.cos(turn) * GUIDE_RING_RADIUS_Y_PX,
+                turn,
+                size,
+                getEnemyColor(currentMaze, i, nowMs),
+                (iconX, iconY) => ctx.drawImage(sprite, iconX - GUIDE_BUG_ICON_W_PX / 2, iconY - GUIDE_BUG_ICON_W_PX * 3 / 8, GUIDE_BUG_ICON_W_PX, GUIDE_BUG_ICON_W_PX * 3 / 4),
+            );
         });
 
         const dotsLeft = currentMaze.dots.size + currentMaze.powerPellets.size;
         if (dotsLeft === 0 || dotsLeft > DOT_GUIDE_MAX_LEFT) {
             return;
         }
-        const step = getStepTowardNearestDot(currentMaze);
-        if (step === null) {
+        const nearestDot = [...currentMaze.dots, ...currentMaze.powerPellets]
+            .filter((key) => distancesFromGuy.has(key))
+            .sort((a, b) => distancesFromGuy.get(a) - distancesFromGuy.get(b))[0];
+        if (nearestDot === undefined) {
             return;
         }
-        const turn = getTurnAngleToward(camera, step[0], step[1]);
-        drawGuideArrow(VIEW_W / 2, GUIDE_DOT_ARROW_Y_PX, turn, GUIDE_DOT_ARROW_SIZE_PX, DOT_COLOR);
+        const [dotX, dotY] = nearestDot.split(",").map(Number);
+        const turn = getTurnAngleToward(camera, getWrappedDeltaX(camera.x, dotX + 0.5), dotY + 0.5 - camera.y);
+        const ringX = VIEW_W / 2 + Math.sin(turn) * GUIDE_RING_RADIUS_X_PX;
+        const ringY = VIEW_H / 2 - Math.cos(turn) * GUIDE_RING_RADIUS_Y_PX;
+        drawGuideArrow(ringX, ringY, turn, GUIDE_DOT_ARROW_SIZE_PX, DOT_COLOR, (iconX, iconY) => {
+            ctx.fillStyle = DOT_COLOR;
+            ctx.strokeStyle = "rgba(0, 0, 0, 0.8)";
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(iconX, iconY, GUIDE_DOT_ICON_RADIUS_PX, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.stroke();
+        });
     }
 
     // How far the guy would have to turn to face along (dx, dy): 0 straight
@@ -2751,30 +2763,13 @@
         return Math.atan2(camera.dirX * dy - camera.dirY * dx, camera.dirX * dx + camera.dirY * dy);
     }
 
-    // The [dx, dy] of the guy's first step along the shortest walk to the
-    // nearest dot or pellet, or null if none can be reached
-    function getStepTowardNearestDot(currentMaze) {
-        const [guySqX, guySqY] = getGuySquare(currentMaze);
-        const distancesFromGuy = getPathDistances(currentMaze.walls, guySqX, guySqY);
-        const nearest = [...currentMaze.dots, ...currentMaze.powerPellets]
-            .filter((key) => distancesFromGuy.has(key))
-            .sort((a, b) => distancesFromGuy.get(a) - distancesFromGuy.get(b))[0];
-        if (nearest === undefined) {
-            return null;
-        }
-        const [dotX, dotY] = nearest.split(",").map(Number);
-        const distancesFromDot = getPathDistances(currentMaze.walls, dotX, dotY);
-        const guyDistance = distancesFromDot.get(wallKey(guySqX, guySqY));
-        const direction = STEP_DIRECTIONS.find(([dx, dy]) => {
-            const next = getStepDestination(currentMaze.walls, guySqX, guySqY, dx, dy);
-            return next !== null && distancesFromDot.get(wallKey(next[0], next[1])) < guyDistance;
-        });
-        return direction ?? null;
-    }
-
     // A filled arrowhead with a short tail, centred on (x, y), pointing
-    // at angle (0 is up the screen, PI / 2 is right), edged in black
-    function drawGuideArrow(x, y, angle, size, color) {
+    // at angle (0 is up the screen, PI / 2 is right), edged in black, with
+    // drawIcon(x, y) called to draw what it points to just past its tail
+    function drawGuideArrow(x, y, angle, size, color, drawIcon) {
+        const iconReach = size + GUIDE_ICON_GAP_PX;
+        drawIcon(x - Math.sin(angle) * iconReach, y + Math.cos(angle) * iconReach);
+
         ctx.save();
         ctx.translate(x, y);
         ctx.rotate(angle);
@@ -2837,15 +2832,20 @@
             drawRainbowBall((x + 0.5) * MAP_CELL_W, (y + 0.5) * MAP_CELL_H, MAP_PELLET_RADIUS_PX, nowMs);
         }
 
+        // Enemies are the same bug pictures as in the 3D view, a little
+        // bigger than a square so they stand out
         getEnemyDrawSquares(currentMaze, nowMs).forEach(([x, y], i) => {
-            const mapX = x * MAP_CELL_W;
-            const mapY = y * MAP_CELL_H;
+            const width = MAP_CELL_W * MAP_ENEMY_SCALE;
+            const height = MAP_CELL_H * MAP_ENEMY_SCALE;
+            const left = (x + 0.5) * MAP_CELL_W - width / 2;
+            const top = (y + 0.5) * MAP_CELL_H - height / 2;
+            let sprite = getEnemySprite(getEnemyColor(currentMaze, i, nowMs), isEnemyFrightened(currentMaze, i, nowMs));
             if (currentMaze.returningEnemyCorners.has(i)) {
-                drawMapGuyOutline(mapX, mapY, MAP_RETURNING_ENEMY_OUTLINE_COLOR);
-                return;
+                sprite = getEnemySprite(RETURNING_ENEMY_COLOR, false);
+                ctx.globalAlpha = RETURNING_ENEMY_ALPHA;
             }
-            const color = getEnemyColor(currentMaze, i, nowMs);
-            drawMapGuy(mapX, mapY, { left: color, top: [color, color], right: color });
+            ctx.drawImage(sprite, left, top, width, height);
+            ctx.globalAlpha = 1;
         });
 
         const { x, y } = getGuyPosition(currentMaze.guy, nowMs);
@@ -2978,24 +2978,6 @@
             ctx.fillStyle = color;
             ctx.fillRect(left + col * block, top + row * block, block, block);
         }
-    }
-
-    // Just the outline of a guy's shape, with nothing filled in
-    function drawMapGuyOutline(left, top, color) {
-        const block = MAP_BLOCK_PX;
-
-        // Corners of the shape (left leg, top bar, right leg) in blocks,
-        // traced clockwise from the top-left
-        const corners = [[0, 0], [4, 0], [4, 3], [3, 3], [3, 1], [1, 1], [1, 3], [0, 3]];
-
-        ctx.strokeStyle = color;
-        ctx.lineWidth = MAP_OUTLINE_WIDTH_PX;
-        ctx.beginPath();
-        for (const [cornerX, cornerY] of corners) {
-            ctx.lineTo(left + cornerX * block, top + cornerY * block);
-        }
-        ctx.closePath();
-        ctx.stroke();
     }
 
     // Along the top of the status bar, left to right: the score, the level,
