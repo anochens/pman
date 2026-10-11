@@ -198,16 +198,13 @@
     // Walls are Matrix-style green rain: each wall face is
     // MATRIX_COLUMNS_PER_WALL columns by MATRIX_ROWS_PER_WALL rows of
     // glyphs, with bright drops falling down every column at its own
-    // speed, between MIN and MAX rows a second. Squares are split by a
-    // solid green seam, WALL_SEAM_SHARE of a square wide each side, so
-    // corners and the edges between squares stand out. Faces
-    // running north-south are drawn a little darker, as if lit from one
-    // side.
+    // speed, between MIN and MAX rows a second. Every corner gets a solid
+    // green seam, WALL_SEAM_SHARE of a square wide each side, so corners
+    // stand out; flat runs of wall have none. Faces running north-south
+    // are drawn a little darker, as if lit from one side.
     const MATRIX_GLYPHS = "ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ0123456789Z:.=*+<>|";
-    // Every wall starts green. A bubble that bursts on a wall leaves a
-    // splash mark on it (see drawShotMarkColumn), and after
-    // WALL_LOOK_CHANGE_DELAY_MS the rain fades to the next colour in this
-    // list over WALL_LOOK_CHANGE_MS.
+    // Every wall starts green. A bubble that bursts on a wall slowly fades
+    // its rain to the next colour in this list, over WALL_LOOK_CHANGE_MS.
     const MATRIX_PALETTE_RGBS = [
         [60, 255, 120],
         [60, 220, 255],
@@ -215,50 +212,7 @@
         [255, 190, 60],
         [255, 100, 200],
     ];
-    const WALL_LOOK_CHANGE_DELAY_MS = 1500;
-    const WALL_LOOK_CHANGE_MS = 3000;
-
-    // The splash mark, painted on the wall (see drawShotMarkColumn). It is
-    // a cluster of round blobs: a lumpy middle and droplets flung round
-    // it, each given as across and down from the hit point and a radius,
-    // all in units of SHOT_MARK_SCALE wall widths. Drips run down from it
-    // (where across, and how far down in wall heights). A pale core and a
-    // dark dent sit in the middle. The mark bursts out to full size over
-    // SHOT_MARK_GROW_MS, drips reach full length by SHOT_MARK_DRIP_MS, and
-    // it is gone by SHOT_MARK_MS, fading over the last SHOT_MARK_FADE_MS.
-    const SHOT_MARK_SCALE = 0.15;
-    const SHOT_MARK_BLOBS = [
-        { across: 0, down: 0, radius: 0.8 },
-        { across: 0.55, down: 0.35, radius: 0.6 },
-        { across: -0.5, down: 0.3, radius: 0.55 },
-        { across: 0.2, down: -0.55, radius: 0.55 },
-        { across: -0.4, down: -0.45, radius: 0.5 },
-        { across: 1.25, down: -0.35, radius: 0.22 },
-        { across: -1.2, down: 0.2, radius: 0.25 },
-        { across: 0.5, down: 1.15, radius: 0.2 },
-        { across: -0.6, down: -1.1, radius: 0.18 },
-        { across: 1.5, down: 0.6, radius: 0.12 },
-        { across: -1.55, down: -0.55, radius: 0.1 },
-        { across: 0.1, down: -1.45, radius: 0.12 },
-        { across: 0.95, down: -1.0, radius: 0.15 },
-    ];
-    const SHOT_MARK_REACH = 1.7;
-    const SHOT_MARK_DRIPS = [
-        { across: -0.55, length: 0.14 },
-        { across: 0.05, length: 0.26 },
-        { across: 0.5, length: 0.18 },
-    ];
-    const SHOT_MARK_DRIP_HALF_WIDTH = 0.1;
-    const SHOT_MARK_CORE_SHARE = 0.5;
-    const SHOT_MARK_DENT_RADIUS = 0.25;
-    const SHOT_MARK_COLOR = "rgb(90, 220, 190)";
-    const SHOT_MARK_CORE_COLOR = "rgb(215, 255, 245)";
-    const SHOT_MARK_DENT_COLOR = "rgb(10, 40, 32)";
-    const SHOT_MARK_ALPHA = 0.85;
-    const SHOT_MARK_GROW_MS = 140;
-    const SHOT_MARK_DRIP_MS = 1500;
-    const SHOT_MARK_MS = 4500;
-    const SHOT_MARK_FADE_MS = 1500;
+    const WALL_LOOK_CHANGE_MS = 8000;
     const MATRIX_HEAD_WHITENESS = 0.8;
     const MATRIX_BACKGROUND_RGB = [2, 12, 5];
     const MATRIX_DIM_SHARE = 0.22;
@@ -1260,11 +1214,10 @@
             let isGone = false;
 
             for (let step = 0; step < stepCount && !isGone; step++) {
-                const [lastX, lastY] = [x, y];
                 x = (x + bullet.vx * stepMs + worldCols) % worldCols;
                 y += bullet.vy * stepMs;
                 if (isWallAt(updated.walls, Math.floor(x), Math.floor(y))) {
-                    updated = splatOnWall(updated, wallKey(Math.floor(x), Math.floor(y)), bullet, lastX, lastY, nowMs);
+                    updated = recolorShotWall(updated, wallKey(Math.floor(x), Math.floor(y)), nowMs);
                     isGone = true;
                     continue;
                 }
@@ -1288,24 +1241,15 @@
         return { maze: { ...updated, bullets: remainingBullets }, points };
     }
 
-    // A bubble flying at (vx, vy) bursts on a wall at (x, y): a splash
-    // mark on the wall face it hit, and soon after, the wall's rain fading
-    // to the next colour in
-    // MATRIX_PALETTE_RGBS. The face is told apart the way the ray caster
-    // does it: which way it runs, which way the bubble was going, and how
-    // far along the face the mark sits.
-    function splatOnWall(currentMaze, hitWallKey, { vx, vy }, x, y, nowMs) {
+    // A bubble bursts on a wall: the wall's rain starts fading to the next
+    // colour in MATRIX_PALETTE_RGBS
+    function recolorShotWall(currentMaze, hitWallKey, nowMs) {
         const lookIndex = currentMaze.wallLookIndexes.get(hitWallKey)?.toIndex ?? 0;
-        const isNorthSouthFace = vx !== 0;
-        let mark = { isNorthSouthFace, stepSign: Math.sign(vy), along: x - Math.floor(x) };
-        if (isNorthSouthFace) {
-            mark = { isNorthSouthFace, stepSign: Math.sign(vx), along: y - Math.floor(y) };
-        }
         return {
             ...currentMaze,
             wallLookIndexes: new Map([
                 ...currentMaze.wallLookIndexes,
-                [hitWallKey, { fromIndex: lookIndex, toIndex: (lookIndex + 1) % MATRIX_PALETTE_RGBS.length, changedMs: nowMs, mark }],
+                [hitWallKey, { fromIndex: lookIndex, toIndex: (lookIndex + 1) % MATRIX_PALETTE_RGBS.length, changedMs: nowMs }],
             ]),
         };
     }
@@ -2028,7 +1972,7 @@
                 continue;
             }
             wallDepths[column] = hit.distance;
-            drawWallColumn(column, hit, camera.horizonY, currentMaze.wallLookIndexes, nowMs);
+            drawWallColumn(column, hit, camera.horizonY, currentMaze, nowMs);
         }
 
         return wallDepths;
@@ -2093,8 +2037,8 @@
     // One screen column of Matrix rain wall: a 1-pixel-wide slice of the
     // rain picture in the wall's colour (fading to a new one if it was just
     // shot), scrolled down at this glyph column's own speed and dimmed by
-    // distance, with a green seam where two wall squares meet
-    function drawWallColumn(column, { distance, isNorthSouthFace, hitAlong, squareX, squareY, stepSign }, horizonY, wallLookIndexes, nowMs) {
+    // distance, with a green seam down each corner
+    function drawWallColumn(column, { distance, isNorthSouthFace, hitAlong, squareX, squareY, stepSign }, horizonY, currentMaze, nowMs) {
         const wallHeight = VIEW_H / distance;
         const wallTop = horizonY - wallHeight / 2;
 
@@ -2105,14 +2049,15 @@
 
         // Strips overlap a touch so no hairline gaps show between them once
         // the game is scaled to the window
-        if (hitAlong < WALL_SEAM_SHARE || hitAlong > 1 - WALL_SEAM_SHARE) {
+        const edgeSide = getFaceEdgeSide(hitAlong);
+        if (edgeSide !== 0 && isWallCorner(currentMaze.walls, { isNorthSouthFace, squareX, squareY, stepSign }, edgeSide)) {
             ctx.fillStyle = toColor(WALL_SEAM_RGB, light);
             ctx.fillRect(column, wallTop, WALL_STRIP_OVERLAP_W, wallHeight);
             return;
         }
 
-        const look = wallLookIndexes.get(wallKey(squareX, squareY)) ?? { fromIndex: 0, toIndex: 0, changedMs: -Infinity };
-        const lookProgress = clamp((nowMs - look.changedMs - WALL_LOOK_CHANGE_DELAY_MS) / WALL_LOOK_CHANGE_MS, 0, 1);
+        const look = currentMaze.wallLookIndexes.get(wallKey(squareX, squareY)) ?? { fromIndex: 0, toIndex: 0, changedMs: -Infinity };
+        const lookProgress = clamp((nowMs - look.changedMs) / WALL_LOOK_CHANGE_MS, 0, 1);
         const glyphColumn = Math.floor(hitAlong * MATRIX_COLUMNS_PER_WALL);
         const face = { squareX, squareY, isNorthSouthFace, glyphColumn };
         const rowsPerSecond = MATRIX_MIN_ROWS_PER_SECOND
@@ -2134,73 +2079,36 @@
         }
         ctx.globalAlpha = 1;
 
-        const { mark } = look;
-        const isMarkedFace = mark !== undefined && mark.isNorthSouthFace === isNorthSouthFace && mark.stepSign === stepSign;
-        if (isMarkedFace) {
-            drawShotMarkColumn(column, wallTop, wallHeight, hitAlong - mark.along, nowMs - look.changedMs);
-        }
-
         ctx.fillStyle = `rgba(0, 0, 0, ${1 - light})`;
         ctx.fillRect(column, wallTop, WALL_STRIP_OVERLAP_W, wallHeight);
     }
 
-    // One column of the splash a bubble leaves on a wall, offsetAlong
-    // (in wall widths) from where it hit, ageMs after. The blobs and drips
-    // covering this column are merged into runs and each run is filled
-    // once, so overlaps don't show darker; then the pale core and the dark
-    // dent go on top the same way. Everything is round in wall units, so
-    // the mark keeps its shape in perspective like the glyphs do.
-    function drawShotMarkColumn(column, wallTop, wallHeight, offsetAlong, ageMs) {
-        if (ageMs >= SHOT_MARK_MS || Math.abs(offsetAlong) >= SHOT_MARK_SCALE * SHOT_MARK_REACH) {
-            return;
+    // Which edge of a wall face this point across it is on: -1 for the low
+    // edge, 1 for the high edge, 0 for neither
+    function getFaceEdgeSide(hitAlong) {
+        if (hitAlong < WALL_SEAM_SHARE) {
+            return -1;
         }
-        const growth = 1 - (1 - clamp(ageMs / SHOT_MARK_GROW_MS, 0, 1)) ** 3;
-        const scale = SHOT_MARK_SCALE * growth;
-        const across = offsetAlong / scale;
-        const centerY = wallTop + wallHeight * (1 - BULLET_HEIGHT_SHARE);
-        const unitPx = wallHeight * scale;
-
-        const dripShare = clamp(ageMs / SHOT_MARK_DRIP_MS, 0, 1);
-        const dripRuns = SHOT_MARK_DRIPS
-            .filter((drip) => Math.abs(across - drip.across) < SHOT_MARK_DRIP_HALF_WIDTH)
-            .map((drip) => [0, (drip.length * dripShare) / scale]);
-
-        ctx.globalAlpha = clamp((SHOT_MARK_MS - ageMs) / SHOT_MARK_FADE_MS, 0, 1) * SHOT_MARK_ALPHA;
-        const layers = [
-            { color: SHOT_MARK_COLOR, runs: [...getBlobRuns(SHOT_MARK_BLOBS, across, 1), ...dripRuns] },
-            { color: SHOT_MARK_CORE_COLOR, runs: getBlobRuns(SHOT_MARK_BLOBS.slice(0, 5), across, SHOT_MARK_CORE_SHARE) },
-            { color: SHOT_MARK_DENT_COLOR, runs: getBlobRuns([{ across: 0, down: 0, radius: SHOT_MARK_DENT_RADIUS }], across, 1) },
-        ];
-        for (const { color, runs } of layers) {
-            ctx.fillStyle = color;
-            for (const [top, bottom] of mergeRuns(runs)) {
-                ctx.fillRect(column, centerY + top * unitPx, WALL_STRIP_OVERLAP_W, (bottom - top) * unitPx);
-            }
+        if (hitAlong > 1 - WALL_SEAM_SHARE) {
+            return 1;
         }
-        ctx.globalAlpha = 1;
+        return 0;
     }
 
-    // The [top, bottom] each round blob covers at this distance across,
-    // with the blobs shrunk by shrink towards the middle
-    function getBlobRuns(blobs, across, shrink) {
-        return blobs
-            .map(({ across: blobAcross, down, radius }) => {
-                const halfHeight = Math.sqrt(Math.max(0, (radius * shrink) ** 2 - (across - blobAcross * shrink) ** 2));
-                return [down * shrink - halfHeight, down * shrink + halfHeight];
-            })
-            .filter(([top, bottom]) => bottom > top);
-    }
-
-    // Overlapping [top, bottom] runs joined into one, sorted top first
-    function mergeRuns(runs) {
-        const sorted = [...runs].sort((a, b) => a[0] - b[0]);
-        return sorted.reduce((merged, [top, bottom]) => {
-            const last = merged[merged.length - 1];
-            if (last !== undefined && top <= last[1]) {
-                return [...merged.slice(0, -1), [last[0], Math.max(last[1], bottom)]];
-            }
-            return [...merged, [top, bottom]];
-        }, []);
+    // True if this edge of a wall face is a corner. The face looks out
+    // towards -stepSign. Past the edge, if there is no wall the face turns
+    // away (an outside corner); if there is a wall with another wall in
+    // front of it, the face meets a wall coming towards the guy (an inside
+    // corner). Otherwise the next square just carries the same flat wall
+    // on, and there is no corner.
+    function isWallCorner(walls, { isNorthSouthFace, squareX, squareY, stepSign }, edgeSide) {
+        let next = [squareX + edgeSide, squareY];
+        let nextFront = [squareX + edgeSide, squareY - stepSign];
+        if (isNorthSouthFace) {
+            next = [squareX, squareY + edgeSide];
+            nextFront = [squareX - stepSign, squareY + edgeSide];
+        }
+        return !isWallAt(walls, ...next) || isWallAt(walls, ...nextFront);
     }
 
     // The rain picture in one MATRIX_PALETTE_RGBS colour, drawn the first
