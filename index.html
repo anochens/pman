@@ -73,29 +73,35 @@
 
     // ---- The guy (you) ----
 
-    // You see the maze through the guy's eyes. He always moves whole
-    // squares, gliding from the middle of one square to the middle of the
-    // next over GUY_STEP_MS, so he never stops between squares. Holding
-    // Up/W walks forward, Down/S back, A/D step sideways; steps chain at a
-    // steady speed while a key is held. The guy's clock runs every
-    // GUY_UPDATE_INTERVAL_MS.
-    const GUY_STEP_MS = 450;
+    // You see the maze through the guy's eyes. He walks freely, any
+    // distance and facing any way: holding Up/W walks forward, Down/S back,
+    // A/D step sideways, and Left/Right turn him round smoothly for as long
+    // as they are held. The guy's clock runs every GUY_UPDATE_INTERVAL_MS.
+    const GUY_WALK_SQUARES_PER_MS = 1 / 450;
+    const GUY_TURN_RADIANS_PER_MS = Math.PI / 1100;
     const GUY_UPDATE_INTERVAL_MS = 16;
+
+    // Turning speeds up over this long after a turn key goes down, so a
+    // short tap nudges the view a little instead of jerking it round
+    const GUY_TURN_RAMP_MS = 180;
+
+    // How far his body reaches from his middle, in squares; he can't get
+    // closer to a wall than this. Brushing a wall corner next to an
+    // opening slides him into the opening, so passages are easy to enter.
+    const GUY_RADIUS_SQUARES = 0.25;
+
+    // A clock tick longer than this (the tab was in the background) moves
+    // him only this far, so he never jumps through a wall
+    const GUY_MAX_TICK_MS = 50;
 
     // On a phone, a touch held still this long becomes a hold (walking)
     // rather than a tap
     const TOUCH_HOLD_MS = 180;
 
-    // He only ever faces along the grid. Each press of Left/Right turns him
-    // exactly 90 degrees, the view gliding round over GUY_TURN_MS. A turn
-    // pressed mid-step waits until he reaches the middle of the next square.
-    const GUY_TURN_MS = 600;
-
-    // After a turn from standing still, walking waits until the swing is
-    // this far through, so he never sets off one way while the view still
-    // points another. Turns taken on the move don't hold him up.
-    const GUY_TURN_WALK_SHARE = 0.5;
-    const TURN_KEYS = { ArrowLeft: -1, ArrowRight: 1 };
+    // On a phone, sliding a finger sideways turns him this much per pixel,
+    // and a swipe up or down walks him for about one square
+    const TOUCH_TURN_RADIANS_PER_PX = 0.012;
+    const TOUCH_SWIPE_WALK_MS = 450;
 
     // A touch that moves less than this is a tap; more is a swipe
     const SWIPE_MIN_DISTANCE_PX = 30;
@@ -115,11 +121,14 @@
     };
     const GAMEPAD_STICK_THRESHOLD = 0.5;
 
+    // The left stick turns him once pushed sideways further than this
+    const GAMEPAD_STICK_DEADZONE = 0.2;
+
     // The controls hint for each way of playing
     const CONTROLS_HINTS = {
         keyboard: "Up/Down or W/S: walk   Left/Right: turn   A/D: step sideways   Space: blow bubbles",
         gamepad: "D-pad up/down: walk   D-pad left/right: turn   LB/RB: step sideways   A: blow bubbles",
-        touch: "Hold: walk   Swipe up/down: one step   Swipe left/right: turn   Tap: blow bubbles",
+        touch: "Hold: walk   Swipe up/down: one step   Slide left/right: turn   Tap: blow bubbles",
     };
 
     // How to go on from the death and level complete screens, for each way
@@ -130,11 +139,12 @@
         touch: "Tap",
     };
 
-    // Keys held to walk: forward/back and sideways step
+    // Keys held to walk forward/back, step sideways, and turn
     const MOVE_KEYS = {
         ArrowUp: { forward: 1 }, w: { forward: 1 }, W: { forward: 1 },
         ArrowDown: { forward: -1 }, s: { forward: -1 }, S: { forward: -1 },
         a: { strafe: -1 }, A: { strafe: -1 }, d: { strafe: 1 }, D: { strafe: 1 },
+        ArrowLeft: { turn: -1 }, ArrowRight: { turn: 1 },
     };
 
     // ---- Enemies ----
@@ -479,19 +489,13 @@
     //   walls, dots,
     //   powerPellets        Sets of "x,y" keys of squares
     //   guy                 the guy:
-    //     squareX, squareY    the square he is in, or stepping into
-    //     fromX, fromY        middle of the square his current step left from
-    //     stepStartMs         when his current (or last) step began
-    //     stepCount           steps taken this level, for his head bob
-    //     angle               the way he faces, always a multiple of 90
-    //                         degrees in radians (0 is east, y grows south,
-    //                         kept unwrapped so turns swing the short way)
-    //     turnFromAngle,      the view swings from turnFromAngle to angle,
-    //     turnStartMs         starting at turnStartMs
-    //     isTurnWhileWalking  whether his latest turn was taken on the move
-    //                         (then it doesn't hold up his walking)
-    //     queuedTurn          a turn (1 right, -1 left, 0 none) pressed
-    //                         mid-step, waiting for him to reach a square
+    //     x, y                where his middle is, in squares
+    //     squareX, squareY    the square his middle is in
+    //     angle               the way he faces, in radians (0 is east, y
+    //                         grows south)
+    //     walkDistance        squares walked this level, for his head bob
+    //     lastWalkMs          when he last moved
+    //     turnStartMs         when the turn key now held went down, or null
     //   enemies             [x, y] squares
     //   enemySlides         per enemy: where its slide started, when, how long
     //   frightenedUntilMs   when the power runs out
@@ -513,17 +517,26 @@
     // Movement keys currently held
     let heldKeys = new Set();
 
-    // Phone: where the current touch began; the timer that turns a still
-    // touch into a hold; whether a hold has him walking; and a single step
-    // asked for by a swipe up (1) or down (-1), or 0 for none
+    // Phone: where the current touch began and where it was last seen; the
+    // timer that turns a still touch into a hold; whether a hold has him
+    // walking; and a short walk asked for by a swipe, forward (1) or back
+    // (-1) until untilMs
     let touchStart = null;
+    let touchLastX = 0;
     let touchHoldTimerId = null;
     let isTouchHolding = false;
-    let touchStepWaiting = 0;
+    let touchSwipeWalk = { forward: 0, untilMs: -Infinity };
 
-    // Game controller: walking from its D-pad and shoulder buttons, and
-    // which buttons were down last time it was read, to spot new presses
-    let gamepadControls = { forward: 0, strafe: 0 };
+    // The turn waiting to be applied from sliding a finger, in radians
+    let touchTurnRadians = 0;
+
+    // When the guy's clock last ran, to move him by the time since
+    let lastGuyUpdateMs = performance.now();
+
+    // Game controller: walking and turning from its D-pad, stick and
+    // shoulder buttons, and which buttons were down last time it was read,
+    // to spot new presses
+    let gamepadControls = { forward: 0, strafe: 0, turn: 0 };
     let previousGamepadButtons = {};
 
     // "keyboard", "touch" or "gamepad": whichever was used last, so the
@@ -559,16 +572,6 @@
         if (event.key in MOVE_KEYS) {
             event.preventDefault();
             heldKeys = new Set([...heldKeys, event.key]);
-            return;
-        }
-        // One quarter turn per press; holding the key doesn't keep spinning.
-        // The turn waits until he is in the middle of a square, which the
-        // guy's clock checks every few milliseconds; see stepGuy.
-        if (event.key in TURN_KEYS) {
-            event.preventDefault();
-            if (!event.repeat) {
-                queueTurn(TURN_KEYS[event.key]);
-            }
             return;
         }
         if (event.key !== " ") {
@@ -609,14 +612,16 @@
     window.addEventListener("keydown", beginPlaying, { capture: true });
 
     // ---- Phone: holds, swipes and taps ----
-    // Press and hold anywhere to walk forward; let go to stop. Swipe up or
-    // down for one step forward or back, and left or right for a quarter
-    // turn. A quick tap blows a bubble, and starts or restarts the game. A
-    // touch counts as a hold once it has stayed still for TOUCH_HOLD_MS.
+    // Press and hold anywhere to walk forward; let go to stop. Slide the
+    // finger left or right to turn, while holding or not. Swipe up or down
+    // to walk about one square forward or back. A quick tap blows a
+    // bubble, and starts or restarts the game. A touch counts as a hold
+    // once it has stayed still for TOUCH_HOLD_MS.
     window.addEventListener("touchstart", (event) => {
         event.preventDefault();
         const touch = event.changedTouches[0];
         touchStart = { x: touch.clientX, y: touch.clientY };
+        touchLastX = touch.clientX;
         lastInputKind = "touch";
         clearTimeout(touchHoldTimerId);
         touchHoldTimerId = setTimeout(() => {
@@ -626,11 +631,19 @@
         }, TOUCH_HOLD_MS);
     }, { passive: false });
 
-    // A finger that moves far enough is a swipe, never a hold
+    // Sideways finger movement turns him as it happens. A finger that moves
+    // far enough before becoming a hold is a swipe, never a hold.
     window.addEventListener("touchmove", (event) => {
         event.preventDefault();
         const touch = event.changedTouches[0];
-        if (touchStart === null || isTouchHolding) {
+        if (touchStart === null) {
+            return;
+        }
+        if (!isPlayPaused()) {
+            touchTurnRadians += (touch.clientX - touchLastX) * TOUCH_TURN_RADIANS_PER_PX;
+        }
+        touchLastX = touch.clientX;
+        if (isTouchHolding) {
             return;
         }
         const distance = Math.hypot(touch.clientX - touchStart.x, touch.clientY - touchStart.y);
@@ -672,16 +685,17 @@
             return;
         }
 
+        // Sideways swipes already turned him as the finger moved
         if (Math.abs(dx) > Math.abs(dy)) {
-            queueTurn(Math.sign(dx));
             return;
         }
-        touchStepWaiting = -Math.sign(dy);
+        touchSwipeWalk = { forward: -Math.sign(dy), untilMs: performance.now() + TOUCH_SWIPE_WALK_MS };
     }, { passive: false });
 
     // ---- Game controller ----
-    // D-pad (or left stick) up and down walk while held, left and right make
-    // a quarter turn per press, LB and RB step sideways, A or the right
+    // D-pad (or left stick) up and down walk while held, left and right turn
+    // while held (the stick turns faster the further it is pushed), LB and
+    // RB step sideways, A or the right
     // trigger blows bubbles while held, and Start (or any button on the
     // start screen) starts the game or restarts it after dying. Read every
     // few milliseconds, since controllers don't send key events.
@@ -690,7 +704,7 @@
     function pollGamepad() {
         const pads = [...(navigator.getGamepads?.() ?? [])].filter(Boolean);
         if (pads.length === 0) {
-            gamepadControls = { forward: 0, strafe: 0 };
+            gamepadControls = { forward: 0, strafe: 0, turn: 0 };
             return;
         }
         const pad = pads[0];
@@ -727,29 +741,18 @@
             return;
         }
 
-        if (isNewPress("left")) {
-            queueTurn(-1);
-        }
-        if (isNewPress("right")) {
-            queueTurn(1);
-        }
         if (buttons.fire) {
             shoot(performance.now());
+        }
+        let turn = Number(isPressed(GAMEPAD_BUTTON.right)) - Number(isPressed(GAMEPAD_BUTTON.left));
+        if (turn === 0 && Math.abs(stickX) > GAMEPAD_STICK_DEADZONE) {
+            turn = stickX;
         }
         gamepadControls = {
             forward: Number(buttons.up) - Number(buttons.down),
             strafe: Number(buttons.stepRight) - Number(buttons.stepLeft),
+            turn,
         };
-    }
-
-    // Asks for a quarter turn to the right (1) or left (-1). The turn waits
-    // until the guy is in the middle of a square, which his clock checks
-    // every few milliseconds; see stepGuy.
-    function queueTurn(direction) {
-        if (isPlayPaused()) {
-            return;
-        }
-        maze = { ...maze, guy: { ...maze.guy, queuedTurn: direction } };
     }
 
     function beginPlaying() {
@@ -810,7 +813,8 @@
         tunnelRow = Math.floor(worldRows / 2);
         guyStartSquare = [Math.floor(worldCols / 2), worldRows - 2];
         maze = createMaze(layout);
-        touchStepWaiting = 0;
+        touchSwipeWalk = { forward: 0, untilMs: -Infinity };
+        touchTurnRadians = 0;
 
         enemyTickCount = 0;
         clearInterval(enemyTimerId);
@@ -831,17 +835,14 @@
             dots,
             powerPellets,
             guy: {
+                x: guyStartSquare[0] + 0.5,
+                y: guyStartSquare[1] + 0.5,
                 squareX: guyStartSquare[0],
                 squareY: guyStartSquare[1],
-                fromX: guyStartSquare[0] + 0.5,
-                fromY: guyStartSquare[1] + 0.5,
-                stepStartMs: -Infinity,
-                stepCount: 0,
                 angle: startAngle,
-                turnFromAngle: startAngle,
-                turnStartMs: -Infinity,
-                isTurnWhileWalking: false,
-                queuedTurn: 0,
+                walkDistance: 0,
+                lastWalkMs: -Infinity,
+                turnStartMs: null,
             },
             enemies,
             enemySlides: enemies.map(([x, y]) => ({ fromX: x, fromY: y, startMs: -Infinity, durationMs: 1 })),
@@ -877,47 +878,34 @@
         return bestAngle;
     }
 
-    // The guy's clock. Whenever he is standing in the middle of a square he
-    // eats what is there, takes any turn that was waiting, and starts his
-    // next step if a walking key is held. Then any enemy that has reached
-    // him is sorted out. Clearing the last dot and pellet finishes the
-    // level and sets off the fireworks.
+    // The guy's clock. He turns and walks by however long it has been since
+    // the last tick, then eats whatever is in the square he is in. Then
+    // any enemy that has reached him is sorted out. Clearing the last dot
+    // and pellet finishes the level and sets off the fireworks.
     function stepGuy() {
         const nowMs = performance.now();
+        const elapsedMs = Math.min(nowMs - lastGuyUpdateMs, GUY_MAX_TICK_MS);
+        lastGuyUpdateMs = nowMs;
         if (isPlayPaused()) {
+            touchTurnRadians = 0;
             return;
         }
 
-        let current = maze;
+        const controls = getControls(nowMs);
+        const turnedGuy = turnGuy(maze.guy, controls.turn, elapsedMs, nowMs);
+        const movedGuy = walkGuy(maze.walls, turnedGuy, controls, elapsedMs, nowMs);
+        touchTurnRadians = 0;
 
-        // A turn pressed mid-step, toward a way that is open at the square
-        // he is stepping into, starts swinging the view straight away. He
-        // arrives already part way round and walks on without stopping, as
-        // if cutting the corner.
-        const { guy } = current;
-        if (isGuyMidStep(guy, nowMs) && guy.queuedTurn !== 0) {
-            const [sideX, sideY] = getTurnSide(guy, guy.queuedTurn);
-            if (getStepDestination(current.walls, guy.squareX, guy.squareY, sideX, sideY) !== null) {
-                current = { ...current, guy: turnGuy(guy, guy.queuedTurn, nowMs, true) };
-            }
-        }
-
-        if (!isGuyMidStep(current.guy, nowMs)) {
-            const meal = eatAtGuy(current, nowMs);
-            current = meal.maze;
-            score += meal.points;
-            if (current.dots.size === 0 && current.powerPellets.size === 0) {
-                maze = current;
-                isLevelComplete = true;
-                levelCompleteMs = nowMs;
-                heldKeys = new Set();
-                isTouchHolding = false;
-                return;
-            }
-
-            current = { ...current, guy: moveGuyOnFromSquare(current.walls, current.guy, nowMs) };
-            // A swiped single step is tried once, then forgotten
-            touchStepWaiting = 0;
+        const meal = eatAtGuy({ ...maze, guy: movedGuy }, nowMs);
+        const current = meal.maze;
+        score += meal.points;
+        if (current.dots.size === 0 && current.powerPellets.size === 0) {
+            maze = current;
+            isLevelComplete = true;
+            levelCompleteMs = nowMs;
+            heldKeys = new Set();
+            isTouchHolding = false;
+            return;
         }
 
         const collision = resolveCollisions(current, nowMs);
@@ -928,160 +916,125 @@
         }
     }
 
-    // What the guy does next while standing in the middle of a square. A
-    // waiting turn is taken here if that way is open, or if no opening is
-    // close by. But if that way is a wall here and opens up one square
-    // ahead, he is being helped round a corner: he sets off on that one
-    // square and his view starts turning at the same moment, so he reaches
-    // the corner already part way round and carries on into the side
-    // passage in one smooth movement. Otherwise he takes his next step if a
-    // walking key is held.
-    function moveGuyOnFromSquare(walls, guy, nowMs) {
-        if (guy.queuedTurn === 0) {
-            return startNextStep(walls, guy, getControls(), nowMs);
+    // The guy turned by a held turn control (1 full speed right, -1 full
+    // speed left, or anything between) for elapsedMs, plus any finger
+    // slide. Held turning eases up to full speed over GUY_TURN_RAMP_MS.
+    function turnGuy(guy, turn, elapsedMs, nowMs) {
+        if (turn === 0) {
+            return { ...guy, angle: guy.angle + touchTurnRadians, turnStartMs: null };
         }
-
-        const faceX = Math.round(Math.cos(guy.angle));
-        const faceY = Math.round(Math.sin(guy.angle));
-        const [sideX, sideY] = getTurnSide(guy, guy.queuedTurn);
-
-        const isSideOpenHere = getStepDestination(walls, guy.squareX, guy.squareY, sideX, sideY) !== null;
-        const ahead = getStepDestination(walls, guy.squareX, guy.squareY, faceX, faceY);
-        const isSideOpenAhead = ahead !== null && getStepDestination(walls, ahead[0], ahead[1], sideX, sideY) !== null;
-        if (!isSideOpenHere && isSideOpenAhead) {
-            const steppingAhead = startNextStep(walls, guy, { forward: 1, strafe: 0 }, nowMs);
-            return turnGuy(steppingAhead, guy.queuedTurn, nowMs, true);
-        }
-
-        // He is still on the move if his last step only just finished
-        const isArrivingFromStep = nowMs - (guy.stepStartMs + GUY_STEP_MS) < 2 * GUY_UPDATE_INTERVAL_MS;
-        return startNextStep(walls, turnGuy(guy, guy.queuedTurn, nowMs, isArrivingFromStep), getControls(), nowMs);
+        const turnStartMs = guy.turnStartMs ?? nowMs;
+        const ramp = clamp((nowMs - turnStartMs) / GUY_TURN_RAMP_MS, 0.25, 1);
+        const angle = guy.angle + touchTurnRadians + turn * ramp * GUY_TURN_RADIANS_PER_MS * elapsedMs;
+        return { ...guy, angle, turnStartMs };
     }
 
-    // The way the guy would face after a turn, as a grid step: to the right
-    // of his facing for a right turn (1), to the left for a left turn (-1)
-    function getTurnSide(guy, turn) {
-        const faceX = Math.round(Math.cos(guy.angle));
-        const faceY = Math.round(Math.sin(guy.angle));
-        return [-faceY * turn, faceX * turn];
-    }
-
-    function isGuyMidStep(guy, nowMs) {
-        return nowMs < guy.stepStartMs + GUY_STEP_MS;
-    }
-
-    // The guy setting off on his next step: forward or back the way he
-    // faces, or else sideways along his right hand, if a key for it is
-    // held, that square is open, and any turn has swung far enough round.
-    // Otherwise he stays as he is. A step that follows straight on from the
-    // last one starts exactly when it ended, so his speed stays steady.
-    function startNextStep(walls, guy, { forward, strafe }, nowMs) {
-        const isTurnHoldingUp = !guy.isTurnWhileWalking
-            && getSlideProgress(guy.turnStartMs, GUY_TURN_MS, nowMs) < GUY_TURN_WALK_SHARE;
-        if (isTurnHoldingUp) {
+    // The guy walked for elapsedMs by the forward/back and sideways
+    // controls, at a steady speed whichever way he goes. Each way across
+    // the maze is tried on its own, so walking into a wall at a slant
+    // slides him along it. Brushing the corner of a wall beside an opening
+    // eases him across into the middle of the opening, so he slips into
+    // side passages without having to line up exactly.
+    function walkGuy(walls, guy, { forward, strafe }, elapsedMs, nowMs) {
+        const length = Math.hypot(forward, strafe);
+        if (length === 0) {
             return guy;
         }
+        const reach = (GUY_WALK_SQUARES_PER_MS * elapsedMs) / Math.max(1, length);
+        const dirX = Math.cos(guy.angle);
+        const dirY = Math.sin(guy.angle);
+        const moveX = (dirX * forward - dirY * strafe) * reach;
+        const moveY = (dirY * forward + dirX * strafe) * reach;
 
-        // His facing as a whole grid step, e.g. [0, -1] for north
-        const faceX = Math.round(Math.cos(guy.angle));
-        const faceY = Math.round(Math.sin(guy.angle));
-        let direction = [faceX * forward, faceY * forward];
-        if (forward === 0) {
-            direction = [-faceY * strafe, faceX * strafe];
-        }
-        if (direction[0] === 0 && direction[1] === 0) {
+        let { x, y } = guy;
+        [x, y] = slideGuyAlong(walls, x, y, moveX, true);
+        [y, x] = slideGuyAlong(walls, y, x, moveY, false);
+        x = (x + worldCols) % worldCols;
+
+        const walked = Math.hypot(getWrappedDeltaX(guy.x, x), y - guy.y);
+        if (walked === 0) {
             return guy;
-        }
-
-        const next = getStepDestination(walls, guy.squareX, guy.squareY, direction[0], direction[1]);
-        if (next === null) {
-            return guy;
-        }
-
-        const lastStepEndMs = guy.stepStartMs + GUY_STEP_MS;
-        let stepStartMs = nowMs;
-        if (nowMs - lastStepEndMs < 2 * GUY_UPDATE_INTERVAL_MS) {
-            stepStartMs = lastStepEndMs;
         }
         return {
             ...guy,
-            fromX: guy.squareX + 0.5,
-            fromY: guy.squareY + 0.5,
-            squareX: next[0],
-            squareY: next[1],
-            stepStartMs,
-            stepCount: guy.stepCount + 1,
+            x,
+            y,
+            squareX: Math.floor(x),
+            squareY: Math.floor(y),
+            walkDistance: guy.walkDistance + walked,
+            lastWalkMs: nowMs,
         };
     }
 
-    // Where the guy is right now, in squares: part way along his step from
-    // the middle of one square to the middle of the next, or in the middle
-    // of his square when standing. A step through the tunnel goes the short
-    // way, off one edge and on at the other.
-    function getGuyPosition(guy, nowMs) {
-        const t = getSlideProgress(guy.stepStartMs, GUY_STEP_MS, nowMs);
-        const toX = guy.squareX + 0.5;
-        const toY = guy.squareY + 0.5;
-        const x = guy.fromX + getWrappedDeltaX(guy.fromX, toX) * t;
-        return { x: (x + worldCols) % worldCols, y: guy.fromY + (toY - guy.fromY) * t };
+    // One way across the maze of the guy's walk: moves `along` by `move`
+    // if he fits there, where `across` is his place the other way and
+    // isAlongX says whether `along` is x. If a wall corner is in the way
+    // but the lane through the middle of his square is open, he is eased
+    // across toward that lane instead. Returns [along, across].
+    function slideGuyAlong(walls, along, across, move, isAlongX) {
+        if (move === 0) {
+            return [along, across];
+        }
+        const fits = (a, c) => (isAlongX ? canGuyStand(walls, a, c) : canGuyStand(walls, c, a));
+        if (fits(along + move, across)) {
+            return [along + move, across];
+        }
+        const lane = Math.floor(across) + 0.5;
+        if (lane === across || !fits(along + move, lane)) {
+            return [along, across];
+        }
+        const ease = Math.min(Math.abs(move), Math.abs(lane - across)) * Math.sign(lane - across);
+        if (!fits(along, across + ease)) {
+            return [along, across];
+        }
+        return [along, across + ease];
     }
 
-    // How many squares the guy has walked this level, counting part of a
-    // step, or null if he has stood still a moment; this drives his head
-    // bob and the sway of his gun
+    // Whether the guy's body fits with his middle at (x, y): none of the
+    // squares his body reaches into is a wall
+    function canGuyStand(walls, x, y) {
+        const reach = GUY_RADIUS_SQUARES;
+        return [[-reach, -reach], [reach, -reach], [-reach, reach], [reach, reach]]
+            .every(([dx, dy]) => !isWallAt(walls, Math.floor(x + dx), Math.floor(y + dy)));
+    }
+
+    // Where the guy is right now, in squares
+    function getGuyPosition(guy) {
+        return { x: guy.x, y: guy.y };
+    }
+
+    // How many squares the guy has walked this level, or null if he has
+    // stood still a moment; this drives his head bob and the sway of his gun
     function getGuyWalkDistance(guy, nowMs) {
-        const isWalking = nowMs < guy.stepStartMs + GUY_STEP_MS + WALK_BOB_LINGER_MS;
-        if (!isWalking) {
+        if (nowMs > guy.lastWalkMs + WALK_BOB_LINGER_MS) {
             return null;
         }
-        return guy.stepCount - 1 + getSlideProgress(guy.stepStartMs, GUY_STEP_MS, nowMs);
+        return guy.walkDistance;
     }
 
-    // How the held keys add up: forward (+1) or back (-1), and step right
-    // (+1) or left (-1)
-    function getControls() {
-        const controls = { forward: 0, strafe: 0 };
+    // How the held keys add up: forward (+1) or back (-1), step right (+1)
+    // or left (-1), and turn right (+1) or left (-1)
+    function getControls(nowMs) {
+        const controls = { forward: 0, strafe: 0, turn: 0 };
         for (const key of heldKeys) {
             for (const [control, amount] of Object.entries(MOVE_KEYS[key])) {
                 controls[control] = clamp(controls[control] + amount, -1, 1);
             }
         }
-        // On a phone, a hold walks him forward, and a swipe up or down asks
-        // for one step
-        let touchForward = touchStepWaiting;
+        // On a phone, a hold walks him forward, and a swipe up or down walks
+        // him a little way
+        let touchForward = 0;
+        if (nowMs < touchSwipeWalk.untilMs) {
+            touchForward = touchSwipeWalk.forward;
+        }
         if (isTouchHolding) {
             touchForward = 1;
         }
         return {
             forward: clamp(controls.forward + gamepadControls.forward + touchForward, -1, 1),
             strafe: clamp(controls.strafe + gamepadControls.strafe, -1, 1),
+            turn: clamp(controls.turn + gamepadControls.turn, -1, 1),
         };
-    }
-
-    // The guy a quarter turn to the right (direction 1) or left (-1), with
-    // no turn left waiting. The view swings round from wherever it is right
-    // now, so a second press mid-swing carries on smoothly. isWhileWalking
-    // marks a turn taken on the move, which never holds up his walking;
-    // a turn from standing still makes walking wait for the view to swing
-    // part way round first.
-    function turnGuy(guy, direction, nowMs, isWhileWalking) {
-        return {
-            ...guy,
-            angle: guy.angle + (direction * Math.PI) / 2,
-            turnFromAngle: getGuyViewAngle(guy, nowMs),
-            turnStartMs: nowMs,
-            isTurnWhileWalking: isWhileWalking,
-            queuedTurn: 0,
-        };
-    }
-
-    // The way the guy's view points right now: part way through a turn's
-    // swing, which speeds up gently and slows down gently so it never
-    // lurches, or his facing once the swing is done
-    function getGuyViewAngle(guy, nowMs) {
-        const progress = getSlideProgress(guy.turnStartMs, GUY_TURN_MS, nowMs);
-        const eased = progress * progress * (3 - 2 * progress);
-        return guy.turnFromAngle + (guy.angle - guy.turnFromAngle) * eased;
     }
 
     // True if the square is a wall. Above and below the maze counts as wall;
@@ -1170,17 +1123,17 @@
 
     // ---- Shooting ----
 
-    // Blows a bubble straight along the grid the way the guy faces, unless
-    // he shot too recently. It starts a little in front of him, so it
-    // doesn't fill the whole view in its first moment.
+    // Blows a bubble straight the way the guy faces, unless he shot too
+    // recently. It starts a little in front of him, so it doesn't fill the
+    // whole view in its first moment.
     function shoot(nowMs) {
         if (nowMs - lastShotMs < SHOT_COOLDOWN_MS) {
             return;
         }
         lastShotMs = nowMs;
-        const { x, y } = getGuyPosition(maze.guy, nowMs);
-        const faceX = Math.round(Math.cos(maze.guy.angle));
-        const faceY = Math.round(Math.sin(maze.guy.angle));
+        const { x, y } = getGuyPosition(maze.guy);
+        const faceX = Math.cos(maze.guy.angle);
+        const faceY = Math.sin(maze.guy.angle);
         const bullet = {
             x: (x + faceX * BUBBLE_START_AHEAD_SQUARES + worldCols) % worldCols,
             y: y + faceY * BUBBLE_START_AHEAD_SQUARES,
@@ -1302,7 +1255,7 @@
     // is eaten: the guy scores and it starts walking back. Enemies already
     // walking back are harmless. Any other enemy catches him.
     function resolveCollisions(currentMaze, nowMs) {
-        const { x: guyX, y: guyY } = getGuyPosition(currentMaze.guy, nowMs);
+        const { x: guyX, y: guyY } = getGuyPosition(currentMaze.guy);
         let updated = currentMaze;
         let points = 0;
 
@@ -1936,8 +1889,8 @@
     // the half-width of the view one square ahead. horizonY is the screen
     // row of eye level, bobbing as he walks.
     function getCamera(currentMaze, nowMs) {
-        const { x, y } = getGuyPosition(currentMaze.guy, nowMs);
-        const angle = getGuyViewAngle(currentMaze.guy, nowMs);
+        const { x, y } = getGuyPosition(currentMaze.guy);
+        const { angle } = currentMaze.guy;
         const planeLength = Math.tan(FIELD_OF_VIEW_RADIANS / 2);
 
         let bob = 0;
@@ -3100,13 +3053,13 @@
             ctx.globalAlpha = 1;
         });
 
-        const { x, y } = getGuyPosition(currentMaze.guy, nowMs);
+        const { x, y } = getGuyPosition(currentMaze.guy);
         const guyLeft = (x - 0.5) * MAP_CELL_W;
         const guyTop = (y - 0.5) * MAP_CELL_H;
         drawMapGuy(guyLeft, guyTop, MAP_GUY_COLORS);
 
         // Wedge just in front of him, pointing the way he looks
-        const angle = getGuyViewAngle(currentMaze.guy, nowMs);
+        const { angle } = currentMaze.guy;
         const centerX = x * MAP_CELL_W;
         const centerY = y * MAP_CELL_H;
         const reach = MAP_CELL_W * 0.8;
