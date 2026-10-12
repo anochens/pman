@@ -161,6 +161,9 @@
     // already picks its next one and curves toward it, cutting the corner
     const ENEMY_CORNER_CUT_SQUARES = 0.3;
 
+    // Enemies walk the way they face and turn in arcs no tighter than this
+    const ENEMY_TURN_RADIUS_SQUARES = 0.25;
+
     // Power pellets: big dots, one in each quarter of the maze, that let the
     // guy eat enemies for a while. Frightened enemies turn grey and wander
     // at random, flashing white near the end. An eaten or shot enemy fades
@@ -394,8 +397,10 @@
     // (about 0.65 is straight across), so it doesn't flicker between sides
     const BUG_FLIP_ACROSS_SHARE = 0.15;
 
-    // A bug heading this close to straight at the guy is seen face on
-    const BUG_FRONT_VIEW_RADIANS = Math.PI / 4;
+    // A bug heading this close to straight at the guy is seen face on, and
+    // stays face on until it is heading further off than the second
+    const BUG_FRONT_VIEW_RADIANS = (40 * Math.PI) / 180;
+    const BUG_FRONT_LEAVE_RADIANS = (60 * Math.PI) / 180;
     const BUG_OUTLINE_COLOR = "rgba(0, 0, 0, 0.55)";
 
     // What makes the bugs look mean: glowing eyes (from the middle out)
@@ -1470,8 +1475,8 @@
     // back to a corner. Once it is within ENEMY_CORNER_CUT_SQUARES of that
     // middle it picks its next square and curves off toward it, so it
     // rounds corners instead of stopping square by square. A chasing enemy
-    // in the guy's own square goes straight for him. Each enemy faces the
-    // way it is moving.
+    // in the guy's own square goes straight for him. See steerEnemy for
+    // how each one turns.
     function moveEnemies(currentMaze, elapsedMs, nowMs) {
         const [guySqX, guySqY] = getGuySquare(currentMaze);
         const guyPosition = getGuyPosition(currentMaze.guy);
@@ -1502,19 +1507,7 @@
             if (isChasing && toX === guySqX && toY === guySqY) {
                 target = guyPosition;
             }
-            const dx = getWrappedDeltaX(position.x, target.x);
-            const dy = target.y - position.y;
-            const targetDistance = Math.hypot(dx, dy);
-            const moved = Math.min(reach, targetDistance);
-            let movedPosition = position;
-            let heading = updated.enemyHeadings[i];
-            if (moved > 0) {
-                movedPosition = {
-                    x: (position.x + (dx / targetDistance) * moved + worldCols) % worldCols,
-                    y: position.y + (dy / targetDistance) * moved,
-                };
-                heading = Math.atan2(dy, dx);
-            }
+            const { heading, movedPosition } = steerEnemy(position, updated.enemyHeadings[i], target, reach);
 
             updated = {
                 ...updated,
@@ -1537,6 +1530,43 @@
             .filter(([i]) => returningEnemyCorners.has(i)));
 
         return { ...updated, returningEnemyCorners, returningEnemyUntilMs };
+    }
+
+    // An enemy at position facing heading, moved up to reach squares on
+    // toward target. It walks the way it faces, turning toward the target
+    // no tighter than ENEMY_TURN_RADIUS_SQUARES, so it rounds corners in a
+    // smooth arc. Facing well away (to turn back), it first turns on the
+    // spot. Close to the target it walks straight onto it. Returns its new
+    // heading and position.
+    function steerEnemy(position, heading, target, reach) {
+        const dx = getWrappedDeltaX(position.x, target.x);
+        const dy = target.y - position.y;
+        const targetDistance = Math.hypot(dx, dy);
+        if (targetDistance === 0) {
+            return { heading, movedPosition: position };
+        }
+        const turnLeft = getAngleDifference(heading, Math.atan2(dy, dx));
+        const maxTurn = reach / ENEMY_TURN_RADIUS_SQUARES;
+        if (Math.abs(turnLeft) > Math.PI / 2) {
+            return { heading: heading + clamp(turnLeft, -2 * maxTurn, 2 * maxTurn), movedPosition: position };
+        }
+
+        const newHeading = heading + clamp(turnLeft, -maxTurn, maxTurn);
+        let [moveX, moveY] = [Math.cos(newHeading) * reach, Math.sin(newHeading) * reach];
+        if (targetDistance <= Math.max(reach, ENEMY_TURN_RADIUS_SQUARES)) {
+            const moved = Math.min(reach, targetDistance);
+            [moveX, moveY] = [(dx / targetDistance) * moved, (dy / targetDistance) * moved];
+        }
+        return {
+            heading: newHeading,
+            movedPosition: { x: (position.x + moveX + worldCols) % worldCols, y: position.y + moveY },
+        };
+    }
+
+    // How far to turn from one angle to face another, the short way round,
+    // from -PI to PI
+    function getAngleDifference(fromAngle, toAngle) {
+        return Math.atan2(Math.sin(toAngle - fromAngle), Math.cos(toAngle - fromAngle));
     }
 
     // The square this enemy should head for next from the one it is
@@ -2758,16 +2788,26 @@
     // index, so it only flips once it is clearly crossing the other way
     const bugCrawlSides = new Map();
 
+    // Enemy indexes last seen face on
+    const bugFrontIndexes = new Set();
+
     // Which way a bug at (x, y) walking along heading is seen: "front" when
     // it is coming at the guy, otherwise crawling "left" or "right" across
     // the view. One walking nearly straight away keeps the way it was
-    // crawling.
+    // crawling. A bug seen face on stays so until it has turned clearly
+    // away (BUG_FRONT_LEAVE_RADIANS), so it doesn't flicker between views.
     function getBugCrawlSide(index, heading, x, y, camera) {
         const towardGuy = Math.atan2(camera.y - y, getWrappedDeltaX(x, camera.x));
-        const offCourse = Math.abs(Math.atan2(Math.sin(heading - towardGuy), Math.cos(heading - towardGuy)));
-        if (offCourse < BUG_FRONT_VIEW_RADIANS) {
+        const offCourse = Math.abs(getAngleDifference(heading, towardGuy));
+        let frontLimit = BUG_FRONT_VIEW_RADIANS;
+        if (bugFrontIndexes.has(index)) {
+            frontLimit = BUG_FRONT_LEAVE_RADIANS;
+        }
+        if (offCourse < frontLimit) {
+            bugFrontIndexes.add(index);
             return "front";
         }
+        bugFrontIndexes.delete(index);
         const across = Math.cos(heading) * camera.planeX + Math.sin(heading) * camera.planeY;
         if (across > BUG_FLIP_ACROSS_SHARE) {
             bugCrawlSides.set(index, "right");
