@@ -157,11 +157,16 @@
     // is this close to his
     const CATCH_DISTANCE_SQUARES = 0.55;
 
+    // An enemy this close to the middle of the square it is heading for
+    // already picks its next one and curves toward it, cutting the corner
+    const ENEMY_CORNER_CUT_SQUARES = 0.3;
+
     // Power pellets: big dots, one in each quarter of the maze, that let the
     // guy eat enemies for a while. Frightened enemies turn grey and wander
     // at random, flashing white near the end. An eaten or shot enemy fades
-    // to a ghost and walks at double speed to the corner farthest from the
-    // guy, harmless and not edible, then goes back to normal once it is
+    // to a ghost, backs off and walks at double speed to the corner
+    // farthest from the guy, going round him rather than through him,
+    // harmless and not edible, then goes back to normal once it is
     // there and has been a ghost for RETURNING_ENEMY_MIN_MS, so in small
     // mazes it doesn't bounce straight back.
     const POWER_PELLET_POINTS = 50;
@@ -209,16 +214,20 @@
     const FOG_HALF_DISTANCE_SQUARES = 5.5;
     const FOG_MAX_SHARE = 0.94;
 
-    // The floor and ceiling are dark tiles, one per square, edged with
-    // glowing grid lines, worked out pixel by pixel at half the view's
-    // resolution each frame. Lines widen a little with distance so far
-    // ones don't flicker.
-    const FLOOR_TILE_RGB = [5, 20, 11];
-    const FLOOR_LINE_RGB = [30, 150, 80];
-    const CEILING_TILE_RGB = [1, 6, 3];
-    const CEILING_LINE_RGB = [10, 60, 32];
-    const FLOOR_LINE_WIDTH_SQUARES = 0.025;
-    const FLOOR_LINE_WIDEN_PER_SQUARE = 0.006;
+    // The floor is blacktop: dark asphalt with blotches, pits and small
+    // pale stones, made once as a texture GRAVEL_TEXTURE_PX texels square
+    // covering GRAVEL_TILE_SQUARES squares each way, and repeated. Smaller,
+    // averaged copies of it are used further away so it doesn't sparkle.
+    // The ceiling is the same picture, blurred and much darker, like rough
+    // concrete. Both are worked out pixel by pixel at FLOOR_BUFFER_SCALE of
+    // the view's resolution each frame.
+    const GRAVEL_TEXTURE_PX = 256;
+    const GRAVEL_TILE_SQUARES = 2;
+    const GRAVEL_BASE_GREY = 36;
+    const GRAVEL_STONES_PER_TEXEL = 1 / 14;
+    const GRAVEL_PITS_PER_TEXEL = 1 / 40;
+    const CEILING_SHADE = 0.32;
+    const CEILING_BLUR_LEVEL = 3;
     const FLOOR_BUFFER_SCALE = 0.5;
 
     // Bubbles glow: each one in flight lights the floor, ceiling and walls
@@ -232,19 +241,15 @@
     const BUBBLE_LIGHT_FALLOFF = 3;
     const BUBBLE_LIGHT_REACH_SQUARES = 2.5;
 
-    // The view leans into turns and sideways steps, by up to
-    // CAMERA_LEAN_MAX_RADIANS, easing toward the new lean at
-    // CAMERA_LEAN_EASE_PER_MS. Stopping after a walk dips the view for a
-    // moment. A bug within CAMERA_SHAKE_DISTANCE_SQUARES shakes it, harder
-    // the closer it gets. The world is drawn a touch larger than the view,
-    // so leaning and shaking never show its edges.
-    const CAMERA_LEAN_MAX_RADIANS = 0.025;
-    const CAMERA_LEAN_EASE_PER_MS = 0.008;
+    // Stopping after a walk dips the view for a moment. A bug within
+    // CAMERA_SHAKE_DISTANCE_SQUARES shakes it, harder the closer it gets.
+    // The world is drawn a touch larger than the view, so shaking never
+    // shows its edges.
     const CAMERA_STOP_DIP_PX = 5;
     const CAMERA_STOP_DIP_MS = 260;
     const CAMERA_SHAKE_DISTANCE_SQUARES = 2.2;
     const CAMERA_SHAKE_MAX_PX = 5;
-    const CAMERA_OVERSCAN_SCALE = 1.08;
+    const CAMERA_OVERSCAN_SCALE = 1.03;
 
     // Walls are Matrix-style green rain: each wall face is
     // MATRIX_COLUMNS_PER_WALL columns by MATRIX_ROWS_PER_WALL rows of
@@ -383,6 +388,11 @@
     const BUG_LEG_STEP_MS = 140;
     const BUG_SPOTS_BLOCKS = [[-0.45, -0.1, 0.17], [0.42, 0.05, 0.2], [-0.35, 0.55, 0.15], [0.4, 0.62, 0.13]];
     const BUG_SHADOW_ALPHA = 0.45;
+
+    // A bug crawling nearly straight toward or away from the guy keeps
+    // facing the way it was until it is crossing the view by this much
+    // (about 0.65 is straight across), so it doesn't flicker between sides
+    const BUG_FLIP_ACROSS_SHARE = 0.15;
     const BUG_OUTLINE_COLOR = "rgba(0, 0, 0, 0.55)";
 
     // The bullseye on a frightened enemy: ring sizes in blocks from the
@@ -532,10 +542,10 @@
     //     walkDistance        squares walked this level, for his head bob
     //     lastWalkMs          when he last moved
     //     turnStartMs         when the turn key now held went down, or null
-    //     lean                how far the view leans into his turning and
-    //                         sideways stepping, -1 (left) to 1 (right)
-    //   enemies             [x, y] squares
-    //   enemySlides         per enemy: where its slide started, when, how long
+    //   enemies             per enemy: the [x, y] square it is heading for
+    //                       (or standing in)
+    //   enemyFromSquares    per enemy: the square it last left
+    //   enemyPositions      per enemy: where its middle is, { x, y } in squares
     //   enemyHeadings       per enemy: the way it last walked, in radians
     //   frightenedUntilMs   when the power runs out
     //   frightenedEnemyIndexes  enemies still frightened and edible
@@ -592,10 +602,12 @@
     // from moving before the player can.
     let hasStarted = false;
 
-    // The enemy clock ticks RETURNING_ENEMY_SPEEDUP times per normal step;
-    // returning enemies move every tick, the rest only on full steps
+    // The enemy clock runs every GUY_UPDATE_INTERVAL_MS, moving the enemies
+    // by the time since it last ran. They hold still for one enemy step
+    // interval after the level starts.
     let enemyTimerId = null;
-    let enemyTickCount = 0;
+    let lastEnemyUpdateMs = 0;
+    let levelStartMs = 0;
 
     // Enemy pictures, drawn once per colour and reused every frame
     const enemySpriteCache = new Map();
@@ -857,9 +869,10 @@
         touchSwipeWalk = { forward: 0, untilMs: -Infinity };
         touchTurnRadians = 0;
 
-        enemyTickCount = 0;
+        levelStartMs = performance.now();
+        lastEnemyUpdateMs = levelStartMs;
         clearInterval(enemyTimerId);
-        enemyTimerId = setInterval(stepEnemies, getEnemyStepIntervalMs() / RETURNING_ENEMY_SPEEDUP);
+        enemyTimerId = setInterval(stepEnemies, GUY_UPDATE_INTERVAL_MS);
     }
 
     // A new maze for the current level: walls, dots, power pellets, and
@@ -884,10 +897,10 @@
                 walkDistance: 0,
                 lastWalkMs: -Infinity,
                 turnStartMs: null,
-                lean: 0,
             },
             enemies,
-            enemySlides: enemies.map(([x, y]) => ({ fromX: x, fromY: y, startMs: -Infinity, durationMs: 1 })),
+            enemyFromSquares: enemies,
+            enemyPositions: enemies.map(([x, y]) => ({ x: x + 0.5, y: y + 0.5 })),
             enemyHeadings: enemies.map(([x, y]) => Math.atan2(guyStartSquare[1] - y, getWrappedDeltaX(x, guyStartSquare[0]))),
             flashes: [],
             frightenedUntilMs: -Infinity,
@@ -939,9 +952,8 @@
         const turnedGuy = turnGuy(maze.guy, controls.turn, elapsedMs, nowMs);
         const movedGuy = walkGuy(maze.walls, turnedGuy, controls, elapsedMs, nowMs);
         touchTurnRadians = 0;
-        const lean = getEasedLean(maze.guy, turnedGuy, controls, elapsedMs);
 
-        const meal = eatAtGuy({ ...maze, guy: { ...movedGuy, lean } }, nowMs);
+        const meal = eatAtGuy({ ...maze, guy: movedGuy }, nowMs);
         const current = meal.maze;
         score += meal.points;
         if (current.dots.size === 0 && current.powerPellets.size === 0) {
@@ -972,18 +984,6 @@
         const ramp = clamp((nowMs - turnStartMs) / GUY_TURN_RAMP_MS, 0.25, 1);
         const angle = guy.angle + touchTurnRadians + turn * ramp * GUY_TURN_RADIANS_PER_MS * elapsedMs;
         return { ...guy, angle, turnStartMs };
-    }
-
-    // The guy's lean after elapsedMs: easing toward how fast he is turning
-    // (full speed is a full lean) plus half a lean for stepping sideways
-    function getEasedLean(guyBefore, guyTurned, { strafe }, elapsedMs) {
-        let turnShare = 0;
-        if (elapsedMs > 0) {
-            turnShare = (guyTurned.angle - guyBefore.angle) / (elapsedMs * GUY_TURN_RADIANS_PER_MS);
-        }
-        const target = clamp(turnShare + strafe * 0.5, -1, 1);
-        const ease = Math.min(1, CAMERA_LEAN_EASE_PER_MS * elapsedMs);
-        return guyBefore.lean + (target - guyBefore.lean) * ease;
     }
 
     // The guy walked for elapsedMs by the forward/back and sideways
@@ -1122,13 +1122,13 @@
     }
 
     function stepEnemies() {
-        if (isPlayPaused()) {
+        const nowMs = performance.now();
+        const elapsedMs = Math.min(nowMs - lastEnemyUpdateMs, GUY_MAX_TICK_MS);
+        lastEnemyUpdateMs = nowMs;
+        if (isPlayPaused() || nowMs - levelStartMs < getEnemyStepIntervalMs()) {
             return;
         }
-        enemyTickCount++;
-        const isFullStep = enemyTickCount % RETURNING_ENEMY_SPEEDUP === 0;
-        const nowMs = performance.now();
-        const collision = resolveCollisions(moveEnemies(maze, isFullStep, nowMs), nowMs);
+        const collision = resolveCollisions(moveEnemies(maze, elapsedMs, nowMs), nowMs);
         maze = collision.maze;
         score += collision.points;
         if (collision.isCaught) {
@@ -1242,7 +1242,7 @@
                     continue;
                 }
 
-                const hitIndex = getEnemyCenters(updated, nowMs).findIndex(({ x: enemyX, y: enemyY }, i) => (
+                const hitIndex = getEnemyCenters(updated).findIndex(({ x: enemyX, y: enemyY }, i) => (
                     !updated.returningEnemyCorners.has(i)
                     && getDistanceSquares(x, y, enemyX, enemyY) < BULLET_HIT_RADIUS_SQUARES
                 ));
@@ -1320,7 +1320,7 @@
         let updated = currentMaze;
         let points = 0;
 
-        const centers = getEnemyCenters(currentMaze, nowMs);
+        const centers = getEnemyCenters(currentMaze);
         for (let i = 0; i < centers.length; i++) {
             const isTouching = getDistanceSquares(guyX, guyY, centers[i].x, centers[i].y) < CATCH_DISTANCE_SQUARES;
             if (!isTouching || updated.returningEnemyCorners.has(i)) {
@@ -1350,14 +1350,16 @@
 
     // The maze with this enemy no longer frightened and walking back to
     // the corner farthest from the guy, staying a ghost for at least
-    // RETURNING_ENEMY_MIN_MS
+    // RETURNING_ENEMY_MIN_MS. It backs straight off first, so it never
+    // carries on into him.
     function sendEnemyHome(currentMaze, enemyIndex, nowMs) {
+        const backedOff = backEnemyAway(currentMaze, enemyIndex);
         return {
-            ...currentMaze,
+            ...backedOff,
             frightenedEnemyIndexes: new Set([...currentMaze.frightenedEnemyIndexes].filter((i) => i !== enemyIndex)),
             returningEnemyCorners: new Map([
                 ...currentMaze.returningEnemyCorners,
-                [enemyIndex, getFarthestFreeCorner(currentMaze, enemyIndex)],
+                [enemyIndex, getFarthestFreeCorner(backedOff, enemyIndex)],
             ]),
             returningEnemyUntilMs: new Map([
                 ...currentMaze.returningEnemyUntilMs,
@@ -1370,11 +1372,34 @@
         return nowMs < currentMaze.frightenedUntilMs && currentMaze.frightenedEnemyIndexes.has(index);
     }
 
+    // The enemy, if it was heading for a square closer to the guy, turned
+    // round to head back to the square it came from instead, unless that
+    // is where the guy is
+    function backEnemyAway(currentMaze, enemyIndex) {
+        const [fromX, fromY] = currentMaze.enemyFromSquares[enemyIndex];
+        const [toX, toY] = currentMaze.enemies[enemyIndex];
+        const [guySqX, guySqY] = getGuySquare(currentMaze);
+        const distancesFromGuy = getPathDistances(currentMaze.walls, guySqX, guySqY);
+        const isComingCloser = distancesFromGuy.get(wallKey(toX, toY)) < distancesFromGuy.get(wallKey(fromX, fromY));
+        const isFromGuy = fromX === guySqX && fromY === guySqY;
+        if (!isComingCloser || isFromGuy) {
+            return currentMaze;
+        }
+        return {
+            ...currentMaze,
+            enemies: currentMaze.enemies.map((square, i) => (i === enemyIndex ? [fromX, fromY] : square)),
+            enemyFromSquares: currentMaze.enemyFromSquares.map((square, i) => (i === enemyIndex ? [toX, toY] : square)),
+        };
+    }
+
     // The maze corner farthest from the guy by walking distance that no
-    // other enemy is standing on or heading back to
+    // other enemy is standing on or heading back to, preferring corners
+    // the enemy can reach without passing through the guy
     function getFarthestFreeCorner(currentMaze, enemyIndex) {
         const [guySqX, guySqY] = getGuySquare(currentMaze);
         const distances = getPathDistances(currentMaze.walls, guySqX, guySqY);
+        const [enemySqX, enemySqY] = currentMaze.enemies[enemyIndex];
+        const reachable = getPathDistances(getWallsAvoiding(currentMaze.walls, [wallKey(guySqX, guySqY)], enemySqX, enemySqY), enemySqX, enemySqY);
         const otherEnemyKeys = new Set([
             ...currentMaze.enemies.filter((_, index) => index !== enemyIndex).map(([x, y]) => wallKey(x, y)),
             ...[...currentMaze.returningEnemyCorners.values()].map(([x, y]) => wallKey(x, y)),
@@ -1388,106 +1413,145 @@
         const freeCorners = corners
             .filter(([x, y]) => !otherEnemyKeys.has(wallKey(x, y)))
             .sort((a, b) => distances.get(wallKey(b[0], b[1])) - distances.get(wallKey(a[0], a[1])));
-        return freeCorners[0];
+        return freeCorners.find(([x, y]) => reachable.has(wallKey(x, y))) ?? freeCorners[0];
+    }
+
+    // The next square for an enemy walking back to its corner. It goes
+    // round the guy rather than through him: it keeps off his square and,
+    // where there is another way, the squares beside him. If he blocks the
+    // only way, it waits.
+    function getReturnStep(currentMaze, [enemySqX, enemySqY], [cornerX, cornerY]) {
+        const [guySqX, guySqY] = getGuySquare(currentMaze);
+        const guyKey = wallKey(guySqX, guySqY);
+        const besideGuyKeys = STEP_DIRECTIONS
+            .map(([dx, dy]) => getStepDestination(currentMaze.walls, guySqX, guySqY, dx, dy))
+            .filter((square) => square !== null)
+            .map(([x, y]) => wallKey(x, y));
+        for (const avoidedKeys of [[guyKey, ...besideGuyKeys], [guyKey]]) {
+            const walls = getWallsAvoiding(currentMaze.walls, avoidedKeys, enemySqX, enemySqY);
+            const distances = getPathDistances(walls, cornerX, cornerY);
+            if (distances.has(wallKey(enemySqX, enemySqY))) {
+                return getStepToward(walls, enemySqX, enemySqY, distances, new Set());
+            }
+        }
+        return [enemySqX, enemySqY];
+    }
+
+    // The walls with these squares walled off too, except the enemy's own
+    // square, so paths can be found that keep away from them
+    function getWallsAvoiding(walls, avoidedKeys, enemySqX, enemySqY) {
+        const enemyKey = wallKey(enemySqX, enemySqY);
+        return new Set([...walls, ...avoidedKeys.filter((key) => key !== enemyKey)]);
     }
 
     // ---- Enemy movement ----
 
-    // The maze after one tick of the enemy clock. Eaten enemies walking
-    // back to a corner step every tick. The rest step only on full steps:
-    // along the shortest path toward the guy, or in a random direction
-    // while frightened, and never onto a square another of them is
-    // standing on. Returning enemies pass through everyone.
-    function moveEnemies(currentMaze, isFullStep, nowMs) {
+    // The maze after elapsedMs of enemy movement. Each enemy glides toward
+    // the middle of the square it is heading for, at one square per enemy
+    // step interval, or RETURNING_ENEMY_SPEEDUP times that while walking
+    // back to a corner. Once it is within ENEMY_CORNER_CUT_SQUARES of that
+    // middle it picks its next square and curves off toward it, so it
+    // rounds corners instead of stopping square by square. A chasing enemy
+    // in the guy's own square goes straight for him. Each enemy faces the
+    // way it is moving.
+    function moveEnemies(currentMaze, elapsedMs, nowMs) {
         const [guySqX, guySqY] = getGuySquare(currentMaze);
+        const guyPosition = getGuyPosition(currentMaze.guy);
         const distancesFromGuy = getPathDistances(currentMaze.walls, guySqX, guySqY);
-        const movedEnemies = [];
+        const walkSpeed = 1 / getEnemyStepIntervalMs();
+        let updated = currentMaze;
 
         for (let i = 0; i < currentMaze.enemies.length; i++) {
-            const [enemySqX, enemySqY] = currentMaze.enemies[i];
-            const corner = currentMaze.returningEnemyCorners.get(i);
-
-            if (corner !== undefined) {
-                const distancesFromCorner = getPathDistances(currentMaze.walls, corner[0], corner[1]);
-                movedEnemies.push(getStepToward(currentMaze.walls, enemySqX, enemySqY, distancesFromCorner, new Set()));
-                continue;
+            const isReturning = currentMaze.returningEnemyCorners.has(i);
+            let reach = walkSpeed * elapsedMs;
+            if (isReturning) {
+                reach *= RETURNING_ENEMY_SPEEDUP;
             }
-            if (!isFullStep) {
-                movedEnemies.push([enemySqX, enemySqY]);
-                continue;
-            }
-
-            // Squares held by the other chasing or frightened enemies, using
-            // where the earlier ones have just moved to
-            const occupiedKeys = new Set(
-                [...currentMaze.enemies.keys()]
-                    .filter((j) => j !== i && !currentMaze.returningEnemyCorners.has(j))
-                    .map((j) => {
-                        const [x, y] = j < i ? movedEnemies[j] : currentMaze.enemies[j];
-                        return wallKey(x, y);
-                    })
-            );
-
-            if (isEnemyFrightened(currentMaze, i, nowMs)) {
-                const freeSteps = STEP_DIRECTIONS
-                    .map(([dx, dy]) => getStepDestination(currentMaze.walls, enemySqX, enemySqY, dx, dy))
-                    .filter((next) => next !== null && !occupiedKeys.has(wallKey(next[0], next[1])));
-                let randomStep = [enemySqX, enemySqY];
-                if (freeSteps.length > 0) {
-                    randomStep = freeSteps[Math.floor(Math.random() * freeSteps.length)];
+            const position = updated.enemyPositions[i];
+            let [toX, toY] = updated.enemies[i];
+            let fromSquare = updated.enemyFromSquares[i];
+            const centerDistance = getDistanceSquares(position.x, position.y, toX + 0.5, toY + 0.5);
+            if (centerDistance <= Math.max(reach, ENEMY_CORNER_CUT_SQUARES)) {
+                const [nextX, nextY] = getNextEnemySquare(updated, i, distancesFromGuy, nowMs);
+                if (nextX !== toX || nextY !== toY) {
+                    fromSquare = [toX, toY];
+                    [toX, toY] = [nextX, nextY];
                 }
-                movedEnemies.push(randomStep);
-                continue;
             }
 
-            movedEnemies.push(getStepToward(currentMaze.walls, enemySqX, enemySqY, distancesFromGuy, occupiedKeys));
+            let target = { x: toX + 0.5, y: toY + 0.5 };
+            const isChasing = !isReturning && !isEnemyFrightened(currentMaze, i, nowMs);
+            if (isChasing && toX === guySqX && toY === guySqY) {
+                target = guyPosition;
+            }
+            const dx = getWrappedDeltaX(position.x, target.x);
+            const dy = target.y - position.y;
+            const targetDistance = Math.hypot(dx, dy);
+            const moved = Math.min(reach, targetDistance);
+            let movedPosition = position;
+            let heading = updated.enemyHeadings[i];
+            if (moved > 0) {
+                movedPosition = {
+                    x: (position.x + (dx / targetDistance) * moved + worldCols) % worldCols,
+                    y: position.y + (dy / targetDistance) * moved,
+                };
+                heading = Math.atan2(dy, dx);
+            }
+
+            updated = {
+                ...updated,
+                enemies: updated.enemies.map((square, j) => (j === i ? [toX, toY] : square)),
+                enemyFromSquares: updated.enemyFromSquares.map((square, j) => (j === i ? fromSquare : square)),
+                enemyPositions: updated.enemyPositions.map((place, j) => (j === i ? movedPosition : place)),
+                enemyHeadings: updated.enemyHeadings.map((angle, j) => (j === i ? heading : angle)),
+            };
         }
 
-        // Each enemy that took a step slides from wherever it is drawn now
-        // to its new square, over the time until its next step. One going
-        // through the tunnel appears on the far side instead of sliding back
-        // across the whole maze.
-        const stepIntervalMs = getEnemyStepIntervalMs();
-        const drawSquares = getEnemyDrawSquares(currentMaze, nowMs);
-        const enemySlides = currentMaze.enemySlides.map((slide, i) => {
-            const isReturning = currentMaze.returningEnemyCorners.has(i);
-            if (!isReturning && !isFullStep) {
-                return slide;
-            }
-
-            const [toX, toY] = movedEnemies[i];
-            let [fromX, fromY] = drawSquares[i];
-            if (Math.abs(toX - fromX) > 1) {
-                [fromX, fromY] = [toX, toY];
-            }
-
-            let durationMs = stepIntervalMs;
-            if (isReturning) {
-                durationMs = stepIntervalMs / RETURNING_ENEMY_SPEEDUP;
-            }
-            return { fromX, fromY, startMs: nowMs, durationMs };
-        });
-
-        // Returning enemies that have reached their corner, and been ghosts
-        // long enough, are back to normal; until then they wait there
-        const returningEnemyCorners = new Map([...currentMaze.returningEnemyCorners].filter(([i, [cornerX, cornerY]]) => (
-            movedEnemies[i][0] !== cornerX || movedEnemies[i][1] !== cornerY
-            || nowMs < currentMaze.returningEnemyUntilMs.get(i)
-        )));
-        const returningEnemyUntilMs = new Map([...currentMaze.returningEnemyUntilMs]
+        // Returning enemies that have reached the middle of their corner,
+        // and been ghosts long enough, are back to normal; until then they
+        // wait there
+        const returningEnemyCorners = new Map([...updated.returningEnemyCorners].filter(([i, [cornerX, cornerY]]) => {
+            const { x, y } = updated.enemyPositions[i];
+            const isHome = getDistanceSquares(x, y, cornerX + 0.5, cornerY + 0.5) < 0.05;
+            return !isHome || nowMs < updated.returningEnemyUntilMs.get(i);
+        }));
+        const returningEnemyUntilMs = new Map([...updated.returningEnemyUntilMs]
             .filter(([i]) => returningEnemyCorners.has(i)));
 
-        // Each enemy that moved now faces the way it went
-        const enemyHeadings = currentMaze.enemyHeadings.map((heading, i) => {
-            const [fromX, fromY] = currentMaze.enemies[i];
-            const [toX, toY] = movedEnemies[i];
-            if (fromX === toX && fromY === toY) {
-                return heading;
-            }
-            return Math.atan2(toY - fromY, getWrappedDeltaX(fromX, toX));
-        });
+        return { ...updated, returningEnemyCorners, returningEnemyUntilMs };
+    }
 
-        return { ...currentMaze, enemies: movedEnemies, enemySlides, enemyHeadings, returningEnemyCorners, returningEnemyUntilMs };
+    // The square this enemy should head for next from the one it is
+    // reaching: round the guy to its corner while returning, a random open
+    // neighbour while frightened, or else one step along the shortest path
+    // toward the guy. Chasing and frightened enemies never pick a square
+    // another of them is in or heading for; with nowhere to go, an enemy
+    // stays where it is.
+    function getNextEnemySquare(currentMaze, index, distancesFromGuy, nowMs) {
+        const [squareX, squareY] = currentMaze.enemies[index];
+        const corner = currentMaze.returningEnemyCorners.get(index);
+        if (corner !== undefined) {
+            return getReturnStep(currentMaze, [squareX, squareY], corner);
+        }
+
+        const occupiedKeys = new Set([...currentMaze.enemies.keys()]
+            .filter((j) => j !== index && !currentMaze.returningEnemyCorners.has(j))
+            .flatMap((j) => {
+                const { x, y } = currentMaze.enemyPositions[j];
+                return [wallKey(...currentMaze.enemies[j]), wallKey(Math.floor(x), Math.floor(y))];
+            }));
+
+        if (isEnemyFrightened(currentMaze, index, nowMs)) {
+            const freeSteps = STEP_DIRECTIONS
+                .map(([dx, dy]) => getStepDestination(currentMaze.walls, squareX, squareY, dx, dy))
+                .filter((next) => next !== null && !occupiedKeys.has(wallKey(next[0], next[1])));
+            if (freeSteps.length === 0) {
+                return [squareX, squareY];
+            }
+            return freeSteps[Math.floor(Math.random() * freeSteps.length)];
+        }
+
+        return getStepToward(currentMaze.walls, squareX, squareY, distancesFromGuy, occupiedKeys);
     }
 
     // The neighbouring square that is closest by the given walking
@@ -1511,24 +1575,15 @@
         return bestStep;
     }
 
-    // How far through a slide we are, from 0 to 1
-    function getSlideProgress(startMs, durationMs, nowMs) {
-        return clamp((nowMs - startMs) / durationMs, 0, 1);
+    // Enemies' drawn squares: the top-left corner of a square around each
+    // one's middle
+    function getEnemyDrawSquares(currentMaze) {
+        return currentMaze.enemyPositions.map(({ x, y }) => [x - 0.5, y - 0.5]);
     }
 
-    // Enemies' drawn squares (top-left corners, fractional while gliding).
-    // Linear, so back-to-back steps join into one steady glide.
-    function getEnemyDrawSquares(currentMaze, nowMs) {
-        return currentMaze.enemies.map(([x, y], i) => {
-            const { fromX, fromY, startMs, durationMs } = currentMaze.enemySlides[i];
-            const t = getSlideProgress(startMs, durationMs, nowMs);
-            return [fromX + (x - fromX) * t, fromY + (y - fromY) * t];
-        });
-    }
-
-    // Middle of each enemy where it is drawn, as { x, y } in squares
-    function getEnemyCenters(currentMaze, nowMs) {
-        return getEnemyDrawSquares(currentMaze, nowMs).map(([x, y]) => ({ x: x + 0.5, y: y + 0.5 }));
+    // Middle of each enemy, as { x, y } in squares
+    function getEnemyCenters(currentMaze) {
+        return currentMaze.enemyPositions;
     }
 
     // ---- Paths ----
@@ -1932,7 +1987,7 @@
         ctx.rect(0, 0, GAME_W, GAME_H);
         ctx.clip();
 
-        // The world itself leans and shakes with the camera; the blaster and
+        // The world itself shakes with the camera; the blaster and
         // everything drawn over the view stay steady
         const camera = getCamera(maze, nowMs);
         const lights = getLights(maze, nowMs);
@@ -1941,7 +1996,6 @@
         ctx.rect(0, 0, VIEW_W, VIEW_H);
         ctx.clip();
         ctx.translate(VIEW_W / 2 + camera.shakeX, VIEW_H / 2 + camera.shakeY);
-        ctx.rotate(camera.roll);
         ctx.scale(CAMERA_OVERSCAN_SCALE, CAMERA_OVERSCAN_SCALE);
         ctx.translate(-VIEW_W / 2, -VIEW_H / 2);
         drawCeilingAndFloor(camera, lights);
@@ -1970,9 +2024,8 @@
     // Where the guy's eye is and which way it looks, as used for every ray:
     // direction is his facing, plane points to his right and is as long as
     // the half-width of the view one square ahead. horizonY is the screen
-    // row of eye level, bobbing as he walks and dipping as he stops. roll
-    // tips the view as he leans, and shakeX/shakeY jolt it while a bug is
-    // close.
+    // row of eye level, bobbing as he walks and dipping as he stops.
+    // shakeX/shakeY jolt the view while a bug is close.
     function getCamera(currentMaze, nowMs) {
         const { x, y } = getGuyPosition(currentMaze.guy);
         const { angle } = currentMaze.guy;
@@ -2001,7 +2054,6 @@
             planeX: -Math.sin(angle) * planeLength,
             planeY: Math.cos(angle) * planeLength,
             horizonY: VIEW_H / 2 + bob + dip,
-            roll: currentMaze.guy.lean * CAMERA_LEAN_MAX_RADIANS,
             shakeX: shake[0],
             shakeY: shake[1],
         };
@@ -2014,7 +2066,7 @@
         if (isPlayPaused()) {
             return [0, 0];
         }
-        const nearest = Math.min(Infinity, ...getEnemyCenters(currentMaze, nowMs)
+        const nearest = Math.min(Infinity, ...getEnemyCenters(currentMaze)
             .filter((_, i) => !currentMaze.returningEnemyCorners.has(i) && !isEnemyFrightened(currentMaze, i, nowMs))
             .map(({ x, y }) => getDistanceSquares(guyX, guyY, x, y)));
         const closeness = clamp(1 - nearest / CAMERA_SHAKE_DISTANCE_SQUARES, 0, 1);
@@ -2061,13 +2113,15 @@
     // picture and stretched over the view. Each screen row below the
     // horizon looks at the floor a set distance away (and above it, the
     // ceiling), so walking across the row steps across the maze: each
-    // pixel takes the tile or grid line colour of the point it sees, plus
-    // any bubble light there, faded by the haze.
+    // pixel takes the blacktop colour of the point it sees, from the copy
+    // of the texture whose texels are about a pixel across there, plus any
+    // bubble light, faded by the haze.
     const floorCanvas = document.createElement("canvas");
     floorCanvas.width = Math.round(VIEW_W * FLOOR_BUFFER_SCALE);
     floorCanvas.height = Math.round(VIEW_H * FLOOR_BUFFER_SCALE);
     const floorCtx = floorCanvas.getContext("2d");
     const floorImage = floorCtx.createImageData(floorCanvas.width, floorCanvas.height);
+    const gravelLevels = createGravelLevels();
     function drawCeilingAndFloor(camera, lights) {
         const { width, height } = floorCanvas;
         const pixels = floorImage.data;
@@ -2075,37 +2129,43 @@
         const leftY = camera.dirY - camera.planeY;
         const spanX = 2 * camera.planeX;
         const spanY = 2 * camera.planeY;
+        const texelsPerSquare = GRAVEL_TEXTURE_PX / GRAVEL_TILE_SQUARES;
 
         for (let row = 0; row < height; row++) {
             const offset = (row + 0.5) / FLOOR_BUFFER_SCALE - camera.horizonY;
             const distance = VIEW_H / 2 / Math.max(Math.abs(offset), 0.5);
             const fog = getFogShare(distance);
-            const lineWidth = FLOOR_LINE_WIDTH_SQUARES + distance * FLOOR_LINE_WIDEN_PER_SQUARE;
-            let tileRgb = CEILING_TILE_RGB;
-            let lineRgb = CEILING_LINE_RGB;
-            let glowShare = 0.6;
-            if (offset > 0) {
-                tileRgb = FLOOR_TILE_RGB;
-                lineRgb = FLOOR_LINE_RGB;
-                glowShare = 1;
-            }
             const stepX = (distance * spanX) / width;
             const stepY = (distance * spanY) / width;
+
+            // How many texels one pixel spans here, across the row or from
+            // this row to the next, picks the copy of the texture to use
+            const rowSpan = (distance * distance * 2) / (VIEW_H * FLOOR_BUFFER_SCALE);
+            const pixelSquares = Math.max(Math.hypot(stepX, stepY), rowSpan);
+            let level = clamp(Math.floor(Math.log2(Math.max(1, pixelSquares * texelsPerSquare))), 0, gravelLevels.length - 1);
+            let shade = 1;
+            let glowShare = 1;
+            if (offset <= 0) {
+                level = Math.max(level, CEILING_BLUR_LEVEL);
+                shade = CEILING_SHADE;
+                glowShare = 0.6;
+            }
+            const { size, rgbs } = gravelLevels[level];
+            const texelsPerSquareHere = size / GRAVEL_TILE_SQUARES;
+
             let worldX = camera.x + distance * leftX + stepX / 2;
             let worldY = camera.y + distance * leftY + stepY / 2;
-
             for (let column = 0; column < width; column++) {
-                const acrossX = worldX - Math.floor(worldX);
-                const acrossY = worldY - Math.floor(worldY);
-                const edge = Math.min(acrossX, 1 - acrossX, acrossY, 1 - acrossY);
-                const line = Math.max(0, 1 - edge / lineWidth);
+                const texelX = ((Math.floor(worldX * texelsPerSquareHere) % size) + size) % size;
+                const texelY = ((Math.floor(worldY * texelsPerSquareHere) % size) + size) % size;
+                const texel = (texelY * size + texelX) * 3;
                 let glow = 0;
                 if (lights.length > 0) {
                     glow = getGlowAt(lights, worldX, worldY) * glowShare;
                 }
                 const index = (row * width + column) * 4;
                 for (let channel = 0; channel < 3; channel++) {
-                    const lit = tileRgb[channel] + (lineRgb[channel] - tileRgb[channel]) * line + BUBBLE_LIGHT_RGB[channel] * glow;
+                    const lit = rgbs[texel + channel] * shade + BUBBLE_LIGHT_RGB[channel] * glow;
                     pixels[index + channel] = lit * (1 - fog) + FOG_RGB[channel] * fog;
                 }
                 pixels[index + 3] = 255;
@@ -2117,6 +2177,84 @@
         floorCtx.putImageData(floorImage, 0, 0);
         ctx.imageSmoothingEnabled = true;
         ctx.drawImage(floorCanvas, 0, 0, VIEW_W, VIEW_H);
+    }
+
+    // The blacktop texture and its smaller copies, each { size, rgbs }
+    // with rgbs holding red, green, blue for every texel. The full size
+    // one is dark grey asphalt, gently blotched, with a fine grain, dark
+    // pits and small pale stones in warm and cool greys; it wraps round at
+    // its edges so repeats join up. Each next copy is half the size, every
+    // texel the average of four.
+    function createGravelLevels() {
+        const size = GRAVEL_TEXTURE_PX;
+        const wrap = (value) => ((value % size) + size) % size;
+        const greys = new Float32Array(size * size * 3);
+
+        // Blotches: a coarse grid of random shades, blended smoothly
+        const blotchCells = 16;
+        const blotches = Array.from({ length: blotchCells * blotchCells }, () => Math.random() - 0.5);
+        const getBlotch = (cellX, cellY) => blotches[(cellY % blotchCells) * blotchCells + (cellX % blotchCells)];
+        for (let y = 0; y < size; y++) {
+            for (let x = 0; x < size; x++) {
+                const cellX = (x / size) * blotchCells;
+                const cellY = (y / size) * blotchCells;
+                const [leftX, topY] = [Math.floor(cellX), Math.floor(cellY)];
+                const [shareX, shareY] = [cellX - leftX, cellY - topY];
+                const top = getBlotch(leftX, topY) * (1 - shareX) + getBlotch(leftX + 1, topY) * shareX;
+                const bottom = getBlotch(leftX, topY + 1) * (1 - shareX) + getBlotch(leftX + 1, topY + 1) * shareX;
+                const blotch = (top * (1 - shareY) + bottom * shareY) * 14;
+                const grey = GRAVEL_BASE_GREY + blotch + (Math.random() - 0.5) * 16;
+                const index = (y * size + x) * 3;
+                greys[index] = grey;
+                greys[index + 1] = grey + 1;
+                greys[index + 2] = grey + 2;
+            }
+        }
+
+        // Pits and stones: small soft-edged spots, darker or paler
+        const addSpot = (centerX, centerY, radius, rgb) => {
+            const reach = Math.ceil(radius + 1);
+            for (let dy = -reach; dy <= reach; dy++) {
+                for (let dx = -reach; dx <= reach; dx++) {
+                    const cover = clamp(radius + 0.5 - Math.hypot(dx, dy), 0, 1);
+                    if (cover === 0) {
+                        continue;
+                    }
+                    const index = (wrap(Math.round(centerY) + dy) * size + wrap(Math.round(centerX) + dx)) * 3;
+                    for (let channel = 0; channel < 3; channel++) {
+                        greys[index + channel] += (rgb[channel] - greys[index + channel]) * cover;
+                    }
+                }
+            }
+        };
+        for (let i = 0; i < size * size * GRAVEL_PITS_PER_TEXEL; i++) {
+            const dark = 10 + Math.random() * 12;
+            addSpot(Math.random() * size, Math.random() * size, 0.4 + Math.random() * 1.2, [dark, dark, dark + 1]);
+        }
+        for (let i = 0; i < size * size * GRAVEL_STONES_PER_TEXEL; i++) {
+            const light = 55 + Math.random() ** 2 * 85;
+            const warmth = (Math.random() - 0.5) * 14;
+            addSpot(Math.random() * size, Math.random() * size, 0.3 + Math.random() * 1.1, [light + warmth, light, light - warmth]);
+        }
+
+        const levels = [{ size, rgbs: Uint8ClampedArray.from(greys) }];
+        while (levels[levels.length - 1].size > 1) {
+            const { size: bigSize, rgbs: big } = levels[levels.length - 1];
+            const smallSize = bigSize / 2;
+            const small = new Uint8ClampedArray(smallSize * smallSize * 3);
+            for (let y = 0; y < smallSize; y++) {
+                for (let x = 0; x < smallSize; x++) {
+                    for (let channel = 0; channel < 3; channel++) {
+                        const at = (bigX, bigY) => big[(bigY * bigSize + bigX) * 3 + channel];
+                        small[(y * smallSize + x) * 3 + channel] = (
+                            at(2 * x, 2 * y) + at(2 * x + 1, 2 * y) + at(2 * x, 2 * y + 1) + at(2 * x + 1, 2 * y + 1)
+                        ) / 4;
+                    }
+                }
+            }
+            levels.push({ size: smallSize, rgbs: small });
+        }
+        return levels;
     }
 
     // Casts one ray per screen column through the grid and draws the wall
@@ -2409,7 +2547,7 @@
                 objects.push({ x, y, kind: "bubble" });
             }
         }
-        getEnemyCenters(currentMaze, nowMs).forEach(({ x, y }, i) => {
+        getEnemyCenters(currentMaze).forEach(({ x, y }, i) => {
             objects.push({ x, y, kind: "enemy", index: i });
         });
 
@@ -2420,7 +2558,7 @@
 
         for (const { object, view } of projected) {
             if (object.kind === "enemy") {
-                drawEnemy(currentMaze, object, view, camera, wallDepths, nowMs);
+                drawEnemy(currentMaze, object.index, view, camera, wallDepths, nowMs);
                 continue;
             }
             if (object.kind === "bubble") {
@@ -2533,14 +2671,14 @@
     }
 
     // An enemy standing on the floor, scuttling, with a soft shadow under
-    // it, seen from the side it is facing the guy with, and faded into the
-    // haze by distance. The bug is drawn one screen column at a time so a
-    // wall in front of part of it hides just that part; the shadow shows
+    // it, crawling side-on the way it is crossing the view, and faded into
+    // the haze by distance. The bug is drawn one screen column at a time so
+    // a wall in front of part of it hides just that part; the shadow shows
     // only if the middle of the bug is in sight.
-    function drawEnemy(currentMaze, { index, x, y }, view, camera, wallDepths, nowMs) {
+    function drawEnemy(currentMaze, index, view, camera, wallDepths, nowMs) {
         const hasTarget = isEnemyFrightened(currentMaze, index, nowMs);
         const legFrame = Math.floor(nowMs / BUG_LEG_STEP_MS) % 2;
-        const side = getBugSideSeen(currentMaze.enemyHeadings[index], x, y, camera);
+        const side = getBugCrawlSide(index, currentMaze.enemyHeadings[index], camera);
         let sprite = getEnemySprite(getEnemyColor(currentMaze, index, nowMs), hasTarget, legFrame, side);
         let alpha = 1 - getFogShare(view.depth) * 0.9;
         if (currentMaze.returningEnemyCorners.has(index)) {
@@ -2603,34 +2741,38 @@
         return msLeft > 0 && msLeft < FRIGHTENED_FLASH_FINAL_MS && isFlashBlock;
     }
 
-    // Which side of a bug walking along heading the camera sees: "front"
-    // when it walks toward the guy, "back" when it walks away, otherwise
-    // "left" or "right" for the way it is crossing his view
-    function getBugSideSeen(heading, x, y, camera) {
-        const towardGuy = Math.atan2(camera.y - y, getWrappedDeltaX(x, camera.x));
-        const turnedAway = Math.abs(Math.atan2(Math.sin(heading - towardGuy), Math.cos(heading - towardGuy)));
-        if (turnedAway < Math.PI / 4) {
-            return "front";
+    // Which way each bug was last drawn crawling across the view, by enemy
+    // index, so it only flips once it is clearly crossing the other way
+    const bugCrawlSides = new Map();
+
+    // Which way a bug walking along heading crawls across the view, "left"
+    // or "right". One walking nearly straight toward or away from the guy
+    // keeps the way it was crawling.
+    function getBugCrawlSide(index, heading, camera) {
+        const across = Math.cos(heading) * camera.planeX + Math.sin(heading) * camera.planeY;
+        if (across > BUG_FLIP_ACROSS_SHARE) {
+            bugCrawlSides.set(index, "right");
         }
-        if (turnedAway > (3 * Math.PI) / 4) {
-            return "back";
+        if (across < -BUG_FLIP_ACROSS_SHARE) {
+            bugCrawlSides.set(index, "left");
         }
-        if (Math.cos(heading) * camera.planeX + Math.sin(heading) * camera.planeY > 0) {
-            return "right";
-        }
-        return "left";
+        return getLastBugCrawlSide(index);
     }
 
-    // The enemy as a bug in one colour, seen from one side ("front",
-    // "back", "left" or "right"), shaded as if lit from above: a domed
-    // shell with dark spots and a shine, a round head with glossy eyes and
+    function getLastBugCrawlSide(index) {
+        return bugCrawlSides.get(index) ?? "right";
+    }
+
+    // The enemy as a bug in one colour, crawling side-on toward the
+    // "left" or "right", shaded as if lit from above: a long domed shell
+    // with dark spots and a shine, a round head with a glossy eye and
     // feelers, and three tube-shaded legs each side. legFrame (0 or 1)
     // picks which legs are lifted, so swapping frames makes it scuttle.
     // Drawn into its own small canvas the first time it is needed; the
     // left side is the right side mirrored.
     // hasTarget paints a red-and-white bullseye on the middle of its body,
     // shown on frightened enemies to say they are safe to hit
-    function getEnemySprite(color, hasTarget, legFrame = 0, side = "front") {
+    function getEnemySprite(color, hasTarget, legFrame = 0, side = "right") {
         const cacheKey = `${color}|${hasTarget}|${legFrame}|${side}`;
         if (!enemySpriteCache.has(cacheKey)) {
             const block = ENEMY_SPRITE_BLOCK_PX;
@@ -2644,16 +2786,7 @@
                 spriteCtx.translate(sprite.width, 0);
                 spriteCtx.scale(-1, 1);
             }
-            const bug = { color, rgb: parseHexColor(color), legFrame, block };
-
-            let shellCenter = null;
-            if (side === "front") {
-                shellCenter = drawBugFront(spriteCtx, bug);
-            } else if (side === "back") {
-                shellCenter = drawBugBack(spriteCtx, bug);
-            } else {
-                shellCenter = drawBugSide(spriteCtx, bug);
-            }
+            const shellCenter = drawBugSide(spriteCtx, { color, rgb: parseHexColor(color), legFrame, block });
 
             if (hasTarget) {
                 // Rings from the outside in, alternating red and white, on
@@ -2668,47 +2801,6 @@
             enemySpriteCache.set(cacheKey, sprite);
         }
         return enemySpriteCache.get(cacheKey);
-    }
-
-    // The bug coming straight at the guy: legs out both sides, feelers up,
-    // its shell, and its head and eyes in front. Returns the shell's middle.
-    function drawBugFront(spriteCtx, bug) {
-        const { block, rgb } = bug;
-        const centerX = 2 * block;
-        const shellY = 1.85 * block;
-        const headY = 0.75 * block;
-
-        drawBugSideLegs(spriteCtx, bug, centerX);
-        drawBugFeelers(spriteCtx, bug, centerX, headY);
-        drawBugShell(spriteCtx, bug, centerX, shellY, 0.95 * block, 1.1 * block, true);
-
-        // Shadow the head casts on the shell, then the head
-        spriteCtx.fillStyle = "rgba(0, 0, 0, 0.35)";
-        spriteCtx.beginPath();
-        spriteCtx.ellipse(centerX, headY + 0.45 * block, 0.5 * block, 0.18 * block, 0, 0, Math.PI * 2);
-        spriteCtx.fill();
-        drawBugHead(spriteCtx, bug, centerX, headY, 0.5 * block);
-
-        for (const side of [-1, 1]) {
-            drawBugEye(spriteCtx, block, centerX + side * 0.2 * block, headY - 0.05 * block, 0, 0.04 * block);
-        }
-        return [centerX, shellY];
-    }
-
-    // The bug walking away: legs out both sides, feelers and the top of
-    // its head peeking over a shell that hides the rest. Returns the
-    // shell's middle.
-    function drawBugBack(spriteCtx, bug) {
-        const { block } = bug;
-        const centerX = 2 * block;
-        const shellY = 1.8 * block;
-        const headY = 0.85 * block;
-
-        drawBugSideLegs(spriteCtx, bug, centerX);
-        drawBugFeelers(spriteCtx, bug, centerX, headY);
-        drawBugHead(spriteCtx, bug, centerX, headY, 0.45 * block);
-        drawBugShell(spriteCtx, bug, centerX, shellY, 1 * block, 1.12 * block, false);
-        return [centerX, shellY];
     }
 
     // The bug crossing the view, facing right: its far legs in shadow
@@ -2754,32 +2846,11 @@
             fillShadedBall(spriteCtx, headX + 0.75 * block, (0.65 - shift) * block, 0.1 * block, rgb);
         }
 
-        drawBugShell(spriteCtx, bug, shellX, shellY, 1.3 * block, 0.85 * block, false);
+        drawBugShell(spriteCtx, bug, shellX, shellY, 1.3 * block, 0.85 * block);
         drawLegRow(true);
         drawBugHead(spriteCtx, bug, headX, headY, 0.5 * block);
         drawBugEye(spriteCtx, block, headX + 0.22 * block, headY - 0.12 * block, 0.06 * block, 0.02 * block);
         return [shellX, shellY];
-    }
-
-    // Three legs each side of a bug seen from the front or back: out from
-    // the shell, then bending down to the floor. Alternate legs lift each
-    // frame, the way insects walk.
-    function drawBugSideLegs(spriteCtx, bug, centerX) {
-        const { block, legFrame } = bug;
-        for (const side of [-1, 1]) {
-            [1.45, 1.9, 2.35].forEach((legY, legIndex) => {
-                const isLifted = (legIndex + legFrame + (side > 0 ? 1 : 0)) % 2 === 0;
-                let tipLift = 0;
-                if (isLifted) {
-                    tipLift = BUG_LEG_LIFT_BLOCKS * block;
-                }
-                drawBugLeg(spriteCtx, bug, [
-                    [centerX + side * 0.6 * block, legY * block],
-                    [centerX + side * 1.45 * block, (legY - 0.3) * block - tipLift / 2],
-                    [centerX + side * 1.85 * block, (legY + 0.45) * block - tipLift],
-                ], 0);
-            });
-        }
     }
 
     // One leg through these points, as a tube: a dark edge, the body
@@ -2799,24 +2870,9 @@
         }
     }
 
-    // Two feelers curving up and out from the top of the head, each with
-    // a shaded ball on the end
-    function drawBugFeelers(spriteCtx, { block, rgb }, centerX, headY) {
-        for (const side of [-1, 1]) {
-            spriteCtx.strokeStyle = toColor(shadeRgb(rgb, -0.5), 1);
-            spriteCtx.lineWidth = 0.08 * block;
-            spriteCtx.beginPath();
-            spriteCtx.moveTo(centerX + side * 0.2 * block, headY - 0.3 * block);
-            spriteCtx.quadraticCurveTo(centerX + side * 0.5 * block, headY - 0.7 * block, centerX + side * 0.9 * block, headY - 0.55 * block);
-            spriteCtx.stroke();
-            fillShadedBall(spriteCtx, centerX + side * 0.9 * block, headY - 0.55 * block, 0.1 * block, rgb);
-        }
-    }
-
     // The domed shell: lit at its upper left and dark round its rim, with
-    // dark spots, a split down the middle (when seen from the front or
-    // back, hasSplit) and a shine
-    function drawBugShell(spriteCtx, { block, rgb, color }, centerX, centerY, radiusX, radiusY, hasSplit) {
+    // dark spots and a shine
+    function drawBugShell(spriteCtx, { block, rgb, color }, centerX, centerY, radiusX, radiusY) {
         const shade = (amount) => toColor(shadeRgb(rgb, amount), 1);
         const gradient = spriteCtx.createRadialGradient(
             centerX - 0.35 * radiusX, centerY - 0.45 * radiusY, 0.05 * block,
@@ -2846,15 +2902,6 @@
             spriteCtx.fill();
         }
         spriteCtx.globalAlpha = 1;
-
-        if (hasSplit) {
-            spriteCtx.strokeStyle = shade(-0.7);
-            spriteCtx.lineWidth = 0.06 * block;
-            spriteCtx.beginPath();
-            spriteCtx.moveTo(centerX, centerY - 0.65 * radiusY);
-            spriteCtx.lineTo(centerX, centerY + radiusY);
-            spriteCtx.stroke();
-        }
 
         spriteCtx.fillStyle = "rgba(255, 255, 255, 0.55)";
         spriteCtx.beginPath();
@@ -3259,7 +3306,7 @@
     function drawGuideArrows(currentMaze, camera, nowMs) {
         const [guySqX, guySqY] = getGuySquare(currentMaze);
         const distancesFromGuy = getPathDistances(currentMaze.walls, guySqX, guySqY);
-        const centers = getEnemyCenters(currentMaze, nowMs);
+        const centers = getEnemyCenters(currentMaze);
         currentMaze.enemies.forEach(([squareX, squareY], i) => {
             const steps = distancesFromGuy.get(wallKey(squareX, squareY));
             if (currentMaze.returningEnemyCorners.has(i) || steps === undefined || steps > GUIDE_ENEMY_MAX_STEPS) {
@@ -3270,7 +3317,7 @@
             const nearness = 1 - steps / GUIDE_ENEMY_MAX_STEPS;
             const size = GUIDE_ARROW_MIN_SIZE_PX + (GUIDE_ARROW_MAX_SIZE_PX - GUIDE_ARROW_MIN_SIZE_PX) * nearness ** 2;
             const iconW = GUIDE_BUG_ICON_MIN_W_PX + (GUIDE_BUG_ICON_MAX_W_PX - GUIDE_BUG_ICON_MIN_W_PX) * nearness ** 2;
-            const sprite = getEnemySprite(getEnemyColor(currentMaze, i, nowMs), isEnemyFrightened(currentMaze, i, nowMs));
+            const sprite = getEnemySprite(getEnemyColor(currentMaze, i, nowMs), isEnemyFrightened(currentMaze, i, nowMs), 0, getLastBugCrawlSide(i));
 
             // A close bug's arrow flashes
             const isBlinkOff = steps <= GUIDE_CLOSE_STEPS && Math.floor(nowMs / GUIDE_CLOSE_BLINK_MS) % 2 === 1;
@@ -3392,14 +3439,15 @@
 
         // Enemies are the same bug pictures as in the 3D view, a little
         // bigger than a square so they stand out
-        getEnemyDrawSquares(currentMaze, nowMs).forEach(([x, y], i) => {
+        getEnemyDrawSquares(currentMaze).forEach(([x, y], i) => {
             const width = MAP_CELL_W * MAP_ENEMY_SCALE;
             const height = MAP_CELL_H * MAP_ENEMY_SCALE;
             const left = (x + 0.5) * MAP_CELL_W - width / 2;
             const top = (y + 0.5) * MAP_CELL_H - height / 2;
-            let sprite = getEnemySprite(getEnemyColor(currentMaze, i, nowMs), isEnemyFrightened(currentMaze, i, nowMs));
+            const side = getLastBugCrawlSide(i);
+            let sprite = getEnemySprite(getEnemyColor(currentMaze, i, nowMs), isEnemyFrightened(currentMaze, i, nowMs), 0, side);
             if (currentMaze.returningEnemyCorners.has(i)) {
-                sprite = getEnemySprite(RETURNING_ENEMY_COLOR, false);
+                sprite = getEnemySprite(RETURNING_ENEMY_COLOR, false, 0, side);
                 ctx.globalAlpha = RETURNING_ENEMY_ALPHA;
             }
             ctx.drawImage(sprite, left, top, width, height);
