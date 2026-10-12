@@ -499,9 +499,9 @@
     //   returningEnemyCorners   eaten or shot enemies walking back (index -> [x, y])
     //   returningEnemyUntilMs   earliest each of those may stop being a ghost
     //   startingDotCount    dots and pellets the level began with
-    //   wallLookIndexes     walls that have been shot ("x,y" -> the colours
-    //                       it is fading between, as MATRIX_PALETTE_RGBS
-    //                       indexes, and when the fade began)
+    //   wallLooks           walls that have been shot ("x,y" -> how far
+    //                       through MATRIX_PALETTE_RGBS its colour was and
+    //                       is heading, and when; see getWallLookPosition)
     //   bullets             { x, y, vx, vy, lastMs } in squares, velocity in
     //                       squares per ms
     let maze = null;
@@ -850,7 +850,7 @@
             returningEnemyCorners: new Map(),
             returningEnemyUntilMs: new Map(),
             bullets: [],
-            wallLookIndexes: new Map(),
+            wallLooks: new Map(),
             startingDotCount: dots.size + powerPellets.size,
         };
     }
@@ -1248,17 +1248,25 @@
         return { maze: { ...updated, bullets: remainingBullets }, points };
     }
 
-    // A bubble bursts on a wall: the wall's rain starts fading to the next
-    // colour in MATRIX_PALETTE_RGBS
+    // A bubble bursts on a wall: the wall's rain heads on to the next
+    // colour in MATRIX_PALETTE_RGBS, carrying on smoothly from wherever its
+    // colour is now. A wall already changing can have at most one more
+    // colour queued, so rapid fire never makes it race.
     function recolorShotWall(currentMaze, hitWallKey, nowMs) {
-        const lookIndex = currentMaze.wallLookIndexes.get(hitWallKey)?.toIndex ?? 0;
+        const look = currentMaze.wallLooks.get(hitWallKey) ?? { position: 0, target: 0, updatedMs: nowMs };
+        const position = getWallLookPosition(look, nowMs);
+        const target = Math.min(look.target + 1, Math.floor(position) + 2);
         return {
             ...currentMaze,
-            wallLookIndexes: new Map([
-                ...currentMaze.wallLookIndexes,
-                [hitWallKey, { fromIndex: lookIndex, toIndex: (lookIndex + 1) % MATRIX_PALETTE_RGBS.length, changedMs: nowMs }],
-            ]),
+            wallLooks: new Map([...currentMaze.wallLooks, [hitWallKey, { position, target, updatedMs: nowMs }]]),
         };
+    }
+
+    // How far through MATRIX_PALETTE_RGBS a wall's colour is at nowMs (2.5
+    // is half way from the third colour to the fourth), moving towards its
+    // target at one colour per WALL_LOOK_CHANGE_MS
+    function getWallLookPosition({ position, target, updatedMs }, nowMs) {
+        return Math.min(target, position + (nowMs - updatedMs) / WALL_LOOK_CHANGE_MS);
     }
 
     // ---- Eating and catching ----
@@ -2063,8 +2071,11 @@
             return;
         }
 
-        const look = currentMaze.wallLookIndexes.get(wallKey(squareX, squareY)) ?? { fromIndex: 0, toIndex: 0, changedMs: -Infinity };
-        const lookProgress = clamp((nowMs - look.changedMs) / WALL_LOOK_CHANGE_MS, 0, 1);
+        const look = currentMaze.wallLooks.get(wallKey(squareX, squareY));
+        let lookPosition = 0;
+        if (look !== undefined) {
+            lookPosition = getWallLookPosition(look, nowMs);
+        }
         const glyphColumn = Math.floor(hitAlong * MATRIX_COLUMNS_PER_WALL);
         const face = { squareX, squareY, isNorthSouthFace, glyphColumn };
         const rowsPerSecond = MATRIX_MIN_ROWS_PER_SECOND
@@ -2075,10 +2086,15 @@
         const sourceX = Math.min(MATRIX_COLUMNS_PER_WALL * MATRIX_GLYPH_PX - 1, Math.floor(hitAlong * MATRIX_COLUMNS_PER_WALL * MATRIX_GLYPH_PX));
         const sourceHeight = MATRIX_ROWS_PER_WALL * MATRIX_GLYPH_PX;
 
-        // A shot wall shows its old colour with the new one fading in over it
-        const layers = [{ paletteIndex: look.toIndex, alpha: 1 }];
-        if (lookProgress < 1) {
-            layers.splice(0, 1, { paletteIndex: look.fromIndex, alpha: 1 }, { paletteIndex: look.toIndex, alpha: lookProgress });
+        // A wall part way between two colours shows the first with the
+        // second eased in over it. Every colour's rain has the same glyphs,
+        // so only the colour changes.
+        const paletteCount = MATRIX_PALETTE_RGBS.length;
+        const fromIndex = Math.floor(lookPosition) % paletteCount;
+        const between = lookPosition - Math.floor(lookPosition);
+        const layers = [{ paletteIndex: fromIndex, alpha: 1 }];
+        if (between > 0) {
+            layers.push({ paletteIndex: (fromIndex + 1) % paletteCount, alpha: between * between * (3 - 2 * between) });
         }
         for (const { paletteIndex, alpha } of layers) {
             ctx.globalAlpha = alpha;
@@ -2124,7 +2140,16 @@
     // apart, each a near-white head with a trail fading above it, over dim
     // glyphs. The tile of MATRIX_TILE_ROWS rows is drawn twice, one under
     // the other, so any window of a wall's height can be cut from it as it
-    // scrolls round.
+    // scrolls round. Every colour uses the same glyphs and drops, picked
+    // once in MATRIX_LAYOUT, so fading between colours changes only the
+    // colour.
+    const MATRIX_LAYOUT = {
+        headRows: Array.from({ length: MATRIX_COLUMNS_PER_WALL }, () => Math.floor(Math.random() * (MATRIX_TILE_ROWS / 2))),
+        chars: Array.from({ length: MATRIX_COLUMNS_PER_WALL }, () => Array.from(
+            { length: MATRIX_TILE_ROWS },
+            () => MATRIX_GLYPHS[Math.floor(Math.random() * MATRIX_GLYPHS.length)],
+        )),
+    };
     const matrixTextures = new Map();
     function getMatrixTexture(paletteIndex) {
         if (matrixTextures.has(paletteIndex)) {
@@ -2145,9 +2170,9 @@
 
         const dropSpacing = MATRIX_TILE_ROWS / 2;
         for (let column = 0; column < MATRIX_COLUMNS_PER_WALL; column++) {
-            const headRow = Math.floor(Math.random() * dropSpacing);
+            const headRow = MATRIX_LAYOUT.headRows[column];
             for (let row = 0; row < MATRIX_TILE_ROWS; row++) {
-                const char = MATRIX_GLYPHS[Math.floor(Math.random() * MATRIX_GLYPHS.length)];
+                const char = MATRIX_LAYOUT.chars[column][row];
                 const rowsBehindHead = (((headRow - row) % dropSpacing) + dropSpacing) % dropSpacing;
                 let color = toColor(rainRgb, MATRIX_DIM_SHARE);
                 if (rowsBehindHead === 0) {
