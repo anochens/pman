@@ -199,7 +199,7 @@
     // MATRIX_COLUMNS_PER_WALL columns by MATRIX_ROWS_PER_WALL rows of
     // glyphs, with bright drops falling down every column at its own
     // speed, between MIN and MAX rows a second. Every corner gets a solid
-    // green seam, WALL_SEAM_SHARE of a square wide each side, so corners
+    // black seam, WALL_SEAM_SHARE of a square wide each side, so corners
     // stand out; flat runs of wall have none. Faces running north-south
     // are drawn a little darker, as if lit from one side.
     const MATRIX_GLYPHS = "ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ0123456789Z:.=*+<>|";
@@ -223,7 +223,7 @@
     const MATRIX_TRAIL_ROWS = 8;
     const MATRIX_MIN_ROWS_PER_SECOND = 0.4;
     const MATRIX_MAX_ROWS_PER_SECOND = 1.2;
-    const WALL_SEAM_RGB = [30, 120, 60];
+    const WALL_SEAM_RGB = [0, 0, 0];
     const WALL_SEAM_SHARE = 0.04;
     const SIDE_WALL_SHADE = 0.72;
     const WALL_STRIP_OVERLAP_W = 1.05;
@@ -2044,7 +2044,7 @@
     // One screen column of Matrix rain wall: a 1-pixel-wide slice of the
     // rain picture in the wall's colour (fading to a new one if it was just
     // shot), scrolled down at this glyph column's own speed and dimmed by
-    // distance, with a green seam down each corner
+    // distance, with a black seam down each corner
     function drawWallColumn(column, { distance, isNorthSouthFace, hitAlong, squareX, squareY, stepSign }, horizonY, currentMaze, nowMs) {
         const wallHeight = VIEW_H / distance;
         const wallTop = horizonY - wallHeight / 2;
