@@ -398,6 +398,21 @@
     const BUG_FRONT_VIEW_RADIANS = Math.PI / 4;
     const BUG_OUTLINE_COLOR = "rgba(0, 0, 0, 0.55)";
 
+    // What makes the bugs look mean: glowing eyes (from the middle out)
+    // under dark lids and brows slanted BUG_BROW_TILT_RADIANS into a
+    // scowl, pale-tipped pincers, spikes along the shell and a spur on
+    // each knee. Sizes are in blocks.
+    const BUG_EYE_COLORS = ["#fff6a0", "#ffc21a", "#ff5a00", "#a01800"];
+    const BUG_EYE_GLOW_COLOR = "rgba(255, 120, 0, 0.9)";
+    const BUG_EYE_RADIUS_BLOCKS = 0.2;
+    const BUG_LID_COLOR = "#120404";
+    const BUG_FANG_COLOR = "#f2ead2";
+    const BUG_BROW_TILT_RADIANS = 0.55;
+    const BUG_SHELL_SPIKE_COUNT = 7;
+    const BUG_SHELL_SPIKE_BLOCKS = 0.42;
+    const BUG_LEG_SPUR_BLOCKS = 0.3;
+    const BUG_HEAD_DARKEN = -0.3;
+
     // The bullseye on a frightened enemy: ring sizes in blocks from the
     // outside in, coloured in turn
     const TARGET_RING_RADII_BLOCKS = [1.05, 0.78, 0.5, 0.24];
@@ -1578,12 +1593,6 @@
         return bestStep;
     }
 
-    // Enemies' drawn squares: the top-left corner of a square around each
-    // one's middle
-    function getEnemyDrawSquares(currentMaze) {
-        return currentMaze.enemyPositions.map(({ x, y }) => [x - 0.5, y - 0.5]);
-    }
-
     // Middle of each enemy, as { x, y } in squares
     function getEnemyCenters(currentMaze) {
         return currentMaze.enemyPositions;
@@ -2008,7 +2017,7 @@
         drawBubbleBlaster(maze, camera, nowMs);
         drawCrosshair();
         drawGuideArrows(maze, camera, nowMs);
-        drawMinimap(maze, nowMs);
+        drawMinimap(maze, camera, nowMs);
         drawStatusBar(nowMs);
 
         if (isDead) {
@@ -2766,10 +2775,6 @@
         if (across < -BUG_FLIP_ACROSS_SHARE) {
             bugCrawlSides.set(index, "left");
         }
-        return getLastBugCrawlSide(index);
-    }
-
-    function getLastBugCrawlSide(index) {
         return bugCrawlSides.get(index) ?? "right";
     }
 
@@ -2865,8 +2870,25 @@
         }
 
         drawBugHead(spriteCtx, bug, centerX, headY, 0.5 * block);
+
+        // Fangs, then pincers sweeping out and hooking back in under the
+        // head
         for (const side of [-1, 1]) {
-            drawBugEye(spriteCtx, block, centerX + side * 0.2 * block, headY - 0.08 * block, 0, 0.04 * block);
+            drawBugFang(spriteCtx, block, centerX + side * 0.1 * block, headY + 0.36 * block);
+        }
+        for (const side of [-1, 1]) {
+            drawBugMandible(
+                spriteCtx, bug,
+                [centerX + side * 0.28 * block, headY + 0.3 * block],
+                [centerX + side * 0.85 * block, headY + 0.6 * block],
+                [centerX + side * 0.3 * block, headY + 0.72 * block],
+                0,
+            );
+        }
+
+        // Eyes glaring at the guy, brows slanting down toward the middle
+        for (const side of [-1, 1]) {
+            drawBugEye(spriteCtx, block, centerX + side * 0.21 * block, headY - 0.06 * block, 0, -side * BUG_BROW_TILT_RADIANS);
         }
         return [centerX, shellY];
     }
@@ -2916,14 +2938,38 @@
 
         drawBugShell(spriteCtx, bug, shellX, shellY, 1.3 * block, 0.85 * block);
         drawLegRow(true);
+
+        // Pincers reaching forward from under the head and hooking down,
+        // the far one darker, and a fang
+        for (const shift of [0.1, 0]) {
+            drawBugMandible(
+                spriteCtx, bug,
+                [headX + 0.25 * block, headY + 0.3 * block - shift * block],
+                [headX + 0.8 * block, headY + 0.05 * block - shift * block],
+                [headX + 0.65 * block, headY + 0.5 * block - shift * block],
+                -shift * 3,
+            );
+        }
+        drawBugFang(spriteCtx, block, headX + 0.3 * block, headY + 0.38 * block);
+
         drawBugHead(spriteCtx, bug, headX, headY, 0.5 * block);
-        drawBugEye(spriteCtx, block, headX + 0.22 * block, headY - 0.12 * block, 0.06 * block, 0.02 * block);
+        drawBugEye(spriteCtx, block, headX + 0.22 * block, headY - 0.1 * block, 0.05 * block, BUG_BROW_TILT_RADIANS);
         return [shellX, shellY];
     }
 
     // One leg through these points, as a tube: a dark edge, the body
-    // colour and a thin shine along the top, all darkened by `darken`
+    // colour and a thin shine along the top, all darkened by `darken`,
+    // with a sharp spur sticking up from the knee
     function drawBugLeg(spriteCtx, { block, rgb }, points, darken) {
+        const [kneeX, kneeY] = points[1];
+        const outward = Math.sign(points[2][0] - points[0][0]) || 1;
+        spriteCtx.fillStyle = toColor(shadeRgb(rgb, Math.max(-1, -0.8 + darken)), 1);
+        spriteCtx.beginPath();
+        spriteCtx.moveTo(kneeX - 0.06 * block, kneeY);
+        spriteCtx.lineTo(kneeX + outward * 0.1 * block, kneeY - BUG_LEG_SPUR_BLOCKS * block);
+        spriteCtx.lineTo(kneeX + 0.06 * block, kneeY);
+        spriteCtx.fill();
+
         const strokes = [
             { width: 0.2, shade: -0.6, shiftY: 0 },
             { width: 0.12, shade: -0.1, shiftY: 0 },
@@ -2938,17 +2984,36 @@
         }
     }
 
-    // The domed shell: lit at its upper left and dark round its rim, with
-    // dark spots and a shine
+    // The domed shell: a row of dark spikes along its top, then the shell
+    // lit at its upper left and dark round its rim, with dark spots and a
+    // shine
     function drawBugShell(spriteCtx, { block, rgb, color }, centerX, centerY, radiusX, radiusY) {
         const shade = (amount) => toColor(shadeRgb(rgb, amount), 1);
+
+        // Each spike stands out from the rim, square to it, its base
+        // tucked under the shell's edge
+        spriteCtx.fillStyle = shade(-0.8);
+        for (let i = 0; i < BUG_SHELL_SPIKE_COUNT; i++) {
+            const angle = Math.PI * (1.18 + (0.64 * i) / (BUG_SHELL_SPIKE_COUNT - 1));
+            const rimX = centerX + Math.cos(angle) * radiusX;
+            const rimY = centerY + Math.sin(angle) * radiusY;
+            const normal = Math.atan2(Math.sin(angle) * radiusX, Math.cos(angle) * radiusY);
+            const length = BUG_SHELL_SPIKE_BLOCKS * block;
+            const halfBase = 0.09 * block;
+            spriteCtx.beginPath();
+            spriteCtx.moveTo(rimX - Math.cos(normal) * 0.05 * block - Math.sin(normal) * halfBase, rimY - Math.sin(normal) * 0.05 * block + Math.cos(normal) * halfBase);
+            spriteCtx.lineTo(rimX + Math.cos(normal) * length, rimY + Math.sin(normal) * length);
+            spriteCtx.lineTo(rimX - Math.cos(normal) * 0.05 * block + Math.sin(normal) * halfBase, rimY - Math.sin(normal) * 0.05 * block - Math.cos(normal) * halfBase);
+            spriteCtx.fill();
+        }
+
         const gradient = spriteCtx.createRadialGradient(
             centerX - 0.35 * radiusX, centerY - 0.45 * radiusY, 0.05 * block,
             centerX, centerY, 1.2 * Math.max(radiusX, radiusY),
         );
-        gradient.addColorStop(0, shade(0.6));
-        gradient.addColorStop(0.35, color);
-        gradient.addColorStop(1, shade(-0.65));
+        gradient.addColorStop(0, shade(0.35));
+        gradient.addColorStop(0.3, color);
+        gradient.addColorStop(1, shade(-0.85));
         spriteCtx.fillStyle = gradient;
         spriteCtx.strokeStyle = BUG_OUTLINE_COLOR;
         spriteCtx.lineWidth = 0.05 * block;
@@ -2971,14 +3036,15 @@
         }
         spriteCtx.globalAlpha = 1;
 
-        spriteCtx.fillStyle = "rgba(255, 255, 255, 0.55)";
+        spriteCtx.fillStyle = "rgba(255, 255, 255, 0.3)";
         spriteCtx.beginPath();
         spriteCtx.ellipse(centerX - 0.42 * radiusX, centerY - 0.5 * radiusY, 0.24 * block, 0.12 * block, -0.6, 0, Math.PI * 2);
         spriteCtx.fill();
     }
 
+    // The head: a ball a shade darker than the shell
     function drawBugHead(spriteCtx, { block, rgb }, centerX, centerY, radius) {
-        fillShadedBall(spriteCtx, centerX, centerY, radius, rgb);
+        fillShadedBall(spriteCtx, centerX, centerY, radius, shadeRgb(rgb, BUG_HEAD_DARKEN));
         spriteCtx.strokeStyle = BUG_OUTLINE_COLOR;
         spriteCtx.lineWidth = 0.05 * block;
         spriteCtx.beginPath();
@@ -2986,22 +3052,89 @@
         spriteCtx.stroke();
     }
 
-    // A glossy eye with a glint, its pupil shifted by (lookX, lookY)
-    function drawBugEye(spriteCtx, block, eyeX, eyeY, lookX, lookY) {
-        const eyeGradient = spriteCtx.createRadialGradient(eyeX - 0.05 * block, eyeY - 0.05 * block, 0, eyeX, eyeY, 0.16 * block);
-        eyeGradient.addColorStop(0, "#ffffff");
-        eyeGradient.addColorStop(1, "#b8c4cc");
-        spriteCtx.fillStyle = eyeGradient;
+    // An angry eye: glowing yellow to orange, a black slit pupil shifted
+    // sideways by lookX, a glint, and a dark scowling lid cut across its
+    // top at browTilt radians (positive slopes down to the right), with a
+    // heavy brow along the lid's edge
+    function drawBugEye(spriteCtx, block, eyeX, eyeY, lookX, browTilt) {
+        const radius = BUG_EYE_RADIUS_BLOCKS * block;
+        const glow = spriteCtx.createRadialGradient(eyeX, eyeY, 0, eyeX, eyeY, radius);
+        BUG_EYE_COLORS.forEach((color, i) => glow.addColorStop(i / (BUG_EYE_COLORS.length - 1), color));
+        spriteCtx.save();
+        spriteCtx.shadowColor = BUG_EYE_GLOW_COLOR;
+        spriteCtx.shadowBlur = 0.35 * block;
+        spriteCtx.fillStyle = glow;
         spriteCtx.beginPath();
-        spriteCtx.arc(eyeX, eyeY, 0.16 * block, 0, Math.PI * 2);
+        spriteCtx.arc(eyeX, eyeY, radius, 0, Math.PI * 2);
         spriteCtx.fill();
+        spriteCtx.restore();
+
         spriteCtx.fillStyle = "#000000";
         spriteCtx.beginPath();
-        spriteCtx.arc(eyeX + lookX, eyeY + lookY, 0.08 * block, 0, Math.PI * 2);
+        spriteCtx.ellipse(eyeX + lookX, eyeY + 0.02 * block, 0.035 * block, 0.12 * block, 0, 0, Math.PI * 2);
         spriteCtx.fill();
         spriteCtx.fillStyle = "#ffffff";
         spriteCtx.beginPath();
-        spriteCtx.arc(eyeX + lookX - 0.03 * block, eyeY + lookY - 0.03 * block, 0.025 * block, 0, Math.PI * 2);
+        spriteCtx.arc(eyeX + lookX - 0.06 * block, eyeY + 0.03 * block, 0.025 * block, 0, Math.PI * 2);
+        spriteCtx.fill();
+
+        // The lid: everything of the eye above a slanted line just over its
+        // middle, then the brow drawn along that line and a little past it
+        spriteCtx.save();
+        spriteCtx.translate(eyeX, eyeY - 0.03 * block);
+        spriteCtx.rotate(browTilt);
+        spriteCtx.save();
+        spriteCtx.beginPath();
+        spriteCtx.arc(0, 0.03 * block, radius, 0, Math.PI * 2);
+        spriteCtx.clip();
+        spriteCtx.fillStyle = BUG_LID_COLOR;
+        spriteCtx.fillRect(-radius * 1.5, -radius * 2, radius * 3, radius * 2);
+        spriteCtx.restore();
+        spriteCtx.strokeStyle = BUG_LID_COLOR;
+        spriteCtx.lineCap = "round";
+        spriteCtx.lineWidth = 0.08 * block;
+        spriteCtx.beginPath();
+        spriteCtx.moveTo(-radius * 1.25, 0);
+        spriteCtx.lineTo(radius * 1.25, 0);
+        spriteCtx.stroke();
+        spriteCtx.restore();
+    }
+
+    // A hooked pincer jaw from its root to its tip, bending through bend:
+    // thick and dark at the root, ending in a pale sharp hook
+    function drawBugMandible(spriteCtx, { block, rgb }, [rootX, rootY], [bendX, bendY], [tipX, tipY], darken) {
+        const layers = [
+            { width: 0.22, color: toColor(shadeRgb(rgb, Math.max(-1, -0.8 + darken)), 1) },
+            { width: 0.1, color: toColor(shadeRgb(rgb, Math.max(-1, -0.45 + darken)), 1) },
+        ];
+        for (const { width, color } of layers) {
+            spriteCtx.strokeStyle = color;
+            spriteCtx.lineWidth = width * block;
+            spriteCtx.beginPath();
+            spriteCtx.moveTo(rootX, rootY);
+            spriteCtx.quadraticCurveTo(bendX, bendY, tipX, tipY);
+            spriteCtx.stroke();
+        }
+
+        // The hook carries on past the tip the way the jaw was curving
+        const along = Math.atan2(tipY - bendY, tipX - bendX);
+        const hookLength = 0.22 * block;
+        const halfBase = 0.08 * block;
+        spriteCtx.fillStyle = BUG_FANG_COLOR;
+        spriteCtx.beginPath();
+        spriteCtx.moveTo(tipX - Math.sin(along) * halfBase, tipY + Math.cos(along) * halfBase);
+        spriteCtx.lineTo(tipX + Math.cos(along) * hookLength, tipY + Math.sin(along) * hookLength);
+        spriteCtx.lineTo(tipX + Math.sin(along) * halfBase, tipY - Math.cos(along) * halfBase);
+        spriteCtx.fill();
+    }
+
+    // A pale fang hanging from (x, y)
+    function drawBugFang(spriteCtx, block, x, y) {
+        spriteCtx.fillStyle = BUG_FANG_COLOR;
+        spriteCtx.beginPath();
+        spriteCtx.moveTo(x - 0.06 * block, y);
+        spriteCtx.lineTo(x, y + 0.24 * block);
+        spriteCtx.lineTo(x + 0.06 * block, y);
         spriteCtx.fill();
     }
 
@@ -3385,7 +3518,8 @@
             const nearness = 1 - steps / GUIDE_ENEMY_MAX_STEPS;
             const size = GUIDE_ARROW_MIN_SIZE_PX + (GUIDE_ARROW_MAX_SIZE_PX - GUIDE_ARROW_MIN_SIZE_PX) * nearness ** 2;
             const iconW = GUIDE_BUG_ICON_MIN_W_PX + (GUIDE_BUG_ICON_MAX_W_PX - GUIDE_BUG_ICON_MIN_W_PX) * nearness ** 2;
-            const sprite = getEnemySprite(getEnemyColor(currentMaze, i, nowMs), isEnemyFrightened(currentMaze, i, nowMs), 0, getLastBugCrawlSide(i));
+            const side = getBugCrawlSide(i, currentMaze.enemyHeadings[i], x, y, camera);
+            const sprite = getEnemySprite(getEnemyColor(currentMaze, i, nowMs), isEnemyFrightened(currentMaze, i, nowMs), 0, side);
 
             // A close bug's arrow flashes
             const isBlinkOff = steps <= GUIDE_CLOSE_STEPS && Math.floor(nowMs / GUIDE_CLOSE_BLINK_MS) % 2 === 1;
@@ -3480,7 +3614,7 @@
     // yellow dots and pellets, the enemies as their blocky shapes (grey or
     // flashing when frightened, a faint outline when walking back), and the
     // guy as his four-colour shape with a wedge showing his facing.
-    function drawMinimap(currentMaze, nowMs) {
+    function drawMinimap(currentMaze, camera, nowMs) {
         const mapW = worldCols * MAP_CELL_W;
         const mapH = worldRows * MAP_CELL_H;
         const left = VIEW_W - MINIMAP_MARGIN_PX - mapW * MINIMAP_SCALE;
@@ -3505,17 +3639,19 @@
             drawRainbowBall((x + 0.5) * MAP_CELL_W, (y + 0.5) * MAP_CELL_H, MAP_PELLET_RADIUS_PX, nowMs);
         }
 
-        // Enemies are the same bug pictures as in the 3D view, a little
-        // bigger than a square so they stand out
-        getEnemyDrawSquares(currentMaze).forEach(([x, y], i) => {
+        // Enemies are the same bug pictures as in the 3D view, seen from the
+        // same side and scuttling in step, a little bigger than a square so
+        // they stand out
+        const legFrame = Math.floor(nowMs / BUG_LEG_STEP_MS) % 2;
+        getEnemyCenters(currentMaze).forEach(({ x, y }, i) => {
             const width = MAP_CELL_W * MAP_ENEMY_SCALE;
             const height = MAP_CELL_H * MAP_ENEMY_SCALE;
-            const left = (x + 0.5) * MAP_CELL_W - width / 2;
-            const top = (y + 0.5) * MAP_CELL_H - height / 2;
-            const side = getLastBugCrawlSide(i);
-            let sprite = getEnemySprite(getEnemyColor(currentMaze, i, nowMs), isEnemyFrightened(currentMaze, i, nowMs), 0, side);
+            const left = x * MAP_CELL_W - width / 2;
+            const top = y * MAP_CELL_H - height / 2;
+            const side = getBugCrawlSide(i, currentMaze.enemyHeadings[i], x, y, camera);
+            let sprite = getEnemySprite(getEnemyColor(currentMaze, i, nowMs), isEnemyFrightened(currentMaze, i, nowMs), legFrame, side);
             if (currentMaze.returningEnemyCorners.has(i)) {
-                sprite = getEnemySprite(RETURNING_ENEMY_COLOR, false, 0, side);
+                sprite = getEnemySprite(RETURNING_ENEMY_COLOR, false, legFrame, side);
                 ctx.globalAlpha = RETURNING_ENEMY_ALPHA;
             }
             ctx.drawImage(sprite, left, top, width, height);
