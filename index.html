@@ -196,14 +196,55 @@
     // ---- First-person view ----
 
     // The 3D view is VIEW_W by VIEW_H pixels, with the status bar under it.
-    // A wall square looks VIEW_H tall from one square away. Things fade into
-    // darkness with distance and are gone by FOG_DISTANCE_SQUARES.
+    // A wall square looks VIEW_H tall from one square away.
     const VIEW_W = 800;
     const VIEW_H = 450;
     const FIELD_OF_VIEW_RADIANS = (66 * Math.PI) / 180;
-    const FOG_DISTANCE_SQUARES = 11;
-    const MIN_LIGHT = 0.12;
     const MAX_RAY_STEPS = 80;
+
+    // Everything fades into a dark green haze with distance: hardly at all
+    // close by, half gone about FOG_HALF_DISTANCE_SQUARES away, and never
+    // more than FOG_MAX_SHARE, so the far end of a corridor still shows
+    const FOG_RGB = [3, 16, 9];
+    const FOG_HALF_DISTANCE_SQUARES = 5.5;
+    const FOG_MAX_SHARE = 0.94;
+
+    // The floor and ceiling are dark tiles, one per square, edged with
+    // glowing grid lines, worked out pixel by pixel at half the view's
+    // resolution each frame. Lines widen a little with distance so far
+    // ones don't flicker.
+    const FLOOR_TILE_RGB = [5, 20, 11];
+    const FLOOR_LINE_RGB = [30, 150, 80];
+    const CEILING_TILE_RGB = [1, 6, 3];
+    const CEILING_LINE_RGB = [10, 60, 32];
+    const FLOOR_LINE_WIDTH_SQUARES = 0.025;
+    const FLOOR_LINE_WIDEN_PER_SQUARE = 0.006;
+    const FLOOR_BUFFER_SCALE = 0.5;
+
+    // Bubbles glow: each one in flight lights the floor, ceiling and walls
+    // around it, and a bubble bursting gives a brighter flash that dies
+    // away over BUBBLE_FLASH_MS. Light falls off with distance in squares;
+    // past BUBBLE_LIGHT_REACH_SQUARES it is too faint to bother with.
+    const BUBBLE_LIGHT_RGB = [110, 200, 255];
+    const BUBBLE_LIGHT_STRENGTH = 0.55;
+    const BUBBLE_FLASH_STRENGTH = 1.3;
+    const BUBBLE_FLASH_MS = 450;
+    const BUBBLE_LIGHT_FALLOFF = 3;
+    const BUBBLE_LIGHT_REACH_SQUARES = 2.5;
+
+    // The view leans into turns and sideways steps, by up to
+    // CAMERA_LEAN_MAX_RADIANS, easing toward the new lean at
+    // CAMERA_LEAN_EASE_PER_MS. Stopping after a walk dips the view for a
+    // moment. A bug within CAMERA_SHAKE_DISTANCE_SQUARES shakes it, harder
+    // the closer it gets. The world is drawn a touch larger than the view,
+    // so leaning and shaking never show its edges.
+    const CAMERA_LEAN_MAX_RADIANS = 0.025;
+    const CAMERA_LEAN_EASE_PER_MS = 0.008;
+    const CAMERA_STOP_DIP_PX = 5;
+    const CAMERA_STOP_DIP_MS = 260;
+    const CAMERA_SHAKE_DISTANCE_SQUARES = 2.2;
+    const CAMERA_SHAKE_MAX_PX = 5;
+    const CAMERA_OVERSCAN_SCALE = 1.08;
 
     // Walls are Matrix-style green rain: each wall face is
     // MATRIX_COLUMNS_PER_WALL columns by MATRIX_ROWS_PER_WALL rows of
@@ -237,11 +278,6 @@
     const WALL_SEAM_SHARE = 0.04;
     const SIDE_WALL_SHADE = 0.72;
     const WALL_STRIP_OVERLAP_W = 1.05;
-
-    const CEILING_TOP_COLOR = "#000000";
-    const CEILING_HORIZON_COLOR = "#04160b";
-    const FLOOR_HORIZON_COLOR = "#020c06";
-    const FLOOR_NEAR_COLOR = "#0d2a18";
 
     // Heights of things above the floor, as a share of wall height
     const DOT_HEIGHT_SHARE = 0.18;
@@ -496,8 +532,11 @@
     //     walkDistance        squares walked this level, for his head bob
     //     lastWalkMs          when he last moved
     //     turnStartMs         when the turn key now held went down, or null
+    //     lean                how far the view leans into his turning and
+    //                         sideways stepping, -1 (left) to 1 (right)
     //   enemies             [x, y] squares
     //   enemySlides         per enemy: where its slide started, when, how long
+    //   enemyHeadings       per enemy: the way it last walked, in radians
     //   frightenedUntilMs   when the power runs out
     //   frightenedEnemyIndexes  enemies still frightened and edible
     //   returningEnemyCorners   eaten or shot enemies walking back (index -> [x, y])
@@ -508,6 +547,8 @@
     //                       is heading, and when; see getWallLookPosition)
     //   bullets             { x, y, vx, vy, lastMs } in squares, velocity in
     //                       squares per ms
+    //   flashes             { x, y, startMs }: where and when bubbles burst,
+    //                       for their flash of light
     let maze = null;
 
     // How the game is fitted into the window: its scale and where its
@@ -843,9 +884,12 @@
                 walkDistance: 0,
                 lastWalkMs: -Infinity,
                 turnStartMs: null,
+                lean: 0,
             },
             enemies,
             enemySlides: enemies.map(([x, y]) => ({ fromX: x, fromY: y, startMs: -Infinity, durationMs: 1 })),
+            enemyHeadings: enemies.map(([x, y]) => Math.atan2(guyStartSquare[1] - y, getWrappedDeltaX(x, guyStartSquare[0]))),
+            flashes: [],
             frightenedUntilMs: -Infinity,
             frightenedEnemyIndexes: new Set(),
             returningEnemyCorners: new Map(),
@@ -895,8 +939,9 @@
         const turnedGuy = turnGuy(maze.guy, controls.turn, elapsedMs, nowMs);
         const movedGuy = walkGuy(maze.walls, turnedGuy, controls, elapsedMs, nowMs);
         touchTurnRadians = 0;
+        const lean = getEasedLean(maze.guy, turnedGuy, controls, elapsedMs);
 
-        const meal = eatAtGuy({ ...maze, guy: movedGuy }, nowMs);
+        const meal = eatAtGuy({ ...maze, guy: { ...movedGuy, lean } }, nowMs);
         const current = meal.maze;
         score += meal.points;
         if (current.dots.size === 0 && current.powerPellets.size === 0) {
@@ -927,6 +972,18 @@
         const ramp = clamp((nowMs - turnStartMs) / GUY_TURN_RAMP_MS, 0.25, 1);
         const angle = guy.angle + touchTurnRadians + turn * ramp * GUY_TURN_RADIANS_PER_MS * elapsedMs;
         return { ...guy, angle, turnStartMs };
+    }
+
+    // The guy's lean after elapsedMs: easing toward how fast he is turning
+    // (full speed is a full lean) plus half a lean for stepping sideways
+    function getEasedLean(guyBefore, guyTurned, { strafe }, elapsedMs) {
+        let turnShare = 0;
+        if (elapsedMs > 0) {
+            turnShare = (guyTurned.angle - guyBefore.angle) / (elapsedMs * GUY_TURN_RADIANS_PER_MS);
+        }
+        const target = clamp(turnShare + strafe * 0.5, -1, 1);
+        const ease = Math.min(1, CAMERA_LEAN_EASE_PER_MS * elapsedMs);
+        return guyBefore.lean + (target - guyBefore.lean) * ease;
     }
 
     // The guy walked for elapsedMs by the forward/back and sideways
@@ -1164,6 +1221,7 @@
         let updated = currentMaze;
         let points = 0;
         const remainingBullets = [];
+        const flashes = currentMaze.flashes.filter(({ startMs }) => nowMs - startMs < BUBBLE_FLASH_MS);
 
         for (const bullet of currentMaze.bullets) {
             const elapsedMs = nowMs - bullet.lastMs;
@@ -1174,10 +1232,12 @@
             let isGone = false;
 
             for (let step = 0; step < stepCount && !isGone; step++) {
+                const [lastX, lastY] = [x, y];
                 x = (x + bullet.vx * stepMs + worldCols) % worldCols;
                 y += bullet.vy * stepMs;
                 if (isWallAt(updated.walls, Math.floor(x), Math.floor(y))) {
                     updated = recolorShotWall(updated, wallKey(Math.floor(x), Math.floor(y)), nowMs);
+                    flashes.push({ x: lastX, y: lastY, startMs: nowMs });
                     isGone = true;
                     continue;
                 }
@@ -1189,6 +1249,7 @@
                 if (hitIndex !== -1) {
                     points += SHOT_ENEMY_POINTS;
                     updated = sendEnemyHome(updated, hitIndex, nowMs);
+                    flashes.push({ x, y, startMs: nowMs });
                     isGone = true;
                 }
             }
@@ -1198,7 +1259,7 @@
             }
         }
 
-        return { maze: { ...updated, bullets: remainingBullets }, points };
+        return { maze: { ...updated, bullets: remainingBullets, flashes }, points };
     }
 
     // A bubble bursts on a wall: the wall's rain heads on to the next
@@ -1416,7 +1477,17 @@
         const returningEnemyUntilMs = new Map([...currentMaze.returningEnemyUntilMs]
             .filter(([i]) => returningEnemyCorners.has(i)));
 
-        return { ...currentMaze, enemies: movedEnemies, enemySlides, returningEnemyCorners, returningEnemyUntilMs };
+        // Each enemy that moved now faces the way it went
+        const enemyHeadings = currentMaze.enemyHeadings.map((heading, i) => {
+            const [fromX, fromY] = currentMaze.enemies[i];
+            const [toX, toY] = movedEnemies[i];
+            if (fromX === toX && fromY === toY) {
+                return heading;
+            }
+            return Math.atan2(toY - fromY, getWrappedDeltaX(fromX, toX));
+        });
+
+        return { ...currentMaze, enemies: movedEnemies, enemySlides, enemyHeadings, returningEnemyCorners, returningEnemyUntilMs };
     }
 
     // The neighbouring square that is closest by the given walking
@@ -1861,10 +1932,22 @@
         ctx.rect(0, 0, GAME_W, GAME_H);
         ctx.clip();
 
+        // The world itself leans and shakes with the camera; the blaster and
+        // everything drawn over the view stay steady
         const camera = getCamera(maze, nowMs);
-        drawCeilingAndFloor(camera);
-        const wallDepths = drawWalls(maze, camera, nowMs);
+        const lights = getLights(maze, nowMs);
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(0, 0, VIEW_W, VIEW_H);
+        ctx.clip();
+        ctx.translate(VIEW_W / 2 + camera.shakeX, VIEW_H / 2 + camera.shakeY);
+        ctx.rotate(camera.roll);
+        ctx.scale(CAMERA_OVERSCAN_SCALE, CAMERA_OVERSCAN_SCALE);
+        ctx.translate(-VIEW_W / 2, -VIEW_H / 2);
+        drawCeilingAndFloor(camera, lights);
+        const wallDepths = drawWalls(maze, camera, lights, nowMs);
         drawWorldObjects(maze, camera, wallDepths, nowMs);
+        ctx.restore();
         drawBubbleBlaster(maze, camera, nowMs);
         drawCrosshair();
         drawGuideArrows(maze, camera, nowMs);
@@ -1887,7 +1970,9 @@
     // Where the guy's eye is and which way it looks, as used for every ray:
     // direction is his facing, plane points to his right and is as long as
     // the half-width of the view one square ahead. horizonY is the screen
-    // row of eye level, bobbing as he walks.
+    // row of eye level, bobbing as he walks and dipping as he stops. roll
+    // tips the view as he leans, and shakeX/shakeY jolt it while a bug is
+    // close.
     function getCamera(currentMaze, nowMs) {
         const { x, y } = getGuyPosition(currentMaze.guy);
         const { angle } = currentMaze.guy;
@@ -1899,6 +1984,15 @@
             bob = HEAD_BOB_PX * Math.sin(walkDistance * HEAD_BOB_PER_SQUARE * Math.PI);
         }
 
+        // Stopping: the walk ended a couple of ticks ago, so the view nods
+        // down and back up once
+        const stoppedShare = (nowMs - currentMaze.guy.lastWalkMs - 2 * GUY_UPDATE_INTERVAL_MS) / CAMERA_STOP_DIP_MS;
+        let dip = 0;
+        if (stoppedShare > 0 && stoppedShare < 1) {
+            dip = CAMERA_STOP_DIP_PX * Math.sin(stoppedShare * Math.PI);
+        }
+
+        const shake = getCameraShake(currentMaze, x, y, nowMs);
         return {
             x,
             y,
@@ -1906,29 +2000,130 @@
             dirY: Math.sin(angle),
             planeX: -Math.sin(angle) * planeLength,
             planeY: Math.cos(angle) * planeLength,
-            horizonY: VIEW_H / 2 + bob,
+            horizonY: VIEW_H / 2 + bob + dip,
+            roll: currentMaze.guy.lean * CAMERA_LEAN_MAX_RADIANS,
+            shakeX: shake[0],
+            shakeY: shake[1],
         };
     }
 
-    function drawCeilingAndFloor({ horizonY }) {
-        const ceiling = ctx.createLinearGradient(0, 0, 0, horizonY);
-        ceiling.addColorStop(0, CEILING_TOP_COLOR);
-        ceiling.addColorStop(1, CEILING_HORIZON_COLOR);
-        ctx.fillStyle = ceiling;
-        ctx.fillRect(0, 0, VIEW_W, horizonY);
+    // How far the view is jolted right now, [x, y] in pixels: nothing
+    // unless a chasing bug is within CAMERA_SHAKE_DISTANCE_SQUARES, then a
+    // jitter that grows as it closes in
+    function getCameraShake(currentMaze, guyX, guyY, nowMs) {
+        if (isPlayPaused()) {
+            return [0, 0];
+        }
+        const nearest = Math.min(Infinity, ...getEnemyCenters(currentMaze, nowMs)
+            .filter((_, i) => !currentMaze.returningEnemyCorners.has(i) && !isEnemyFrightened(currentMaze, i, nowMs))
+            .map(({ x, y }) => getDistanceSquares(guyX, guyY, x, y)));
+        const closeness = clamp(1 - nearest / CAMERA_SHAKE_DISTANCE_SQUARES, 0, 1);
+        const size = CAMERA_SHAKE_MAX_PX * closeness * closeness;
+        return [
+            size * (Math.sin(nowMs * 0.071) + 0.5 * Math.sin(nowMs * 0.173)) / 1.5,
+            size * (Math.sin(nowMs * 0.089 + 1) + 0.5 * Math.sin(nowMs * 0.137)) / 1.5,
+        ];
+    }
 
-        const floor = ctx.createLinearGradient(0, horizonY, 0, VIEW_H);
-        floor.addColorStop(0, FLOOR_HORIZON_COLOR);
-        floor.addColorStop(1, FLOOR_NEAR_COLOR);
-        ctx.fillStyle = floor;
-        ctx.fillRect(0, horizonY, VIEW_W, VIEW_H - horizonY);
+    // How much of something this far away is lost in the haze, 0 to
+    // FOG_MAX_SHARE
+    function getFogShare(distance) {
+        return FOG_MAX_SHARE * (1 - 2 ** (-((distance / FOG_HALF_DISTANCE_SQUARES) ** 2)));
+    }
+
+    // What glows right now: every bubble in flight, and every recent burst
+    // fading away. Each is { x, y, strength } in squares.
+    function getLights(currentMaze, nowMs) {
+        const bubbles = currentMaze.bullets.map(({ x, y }) => ({ x, y, strength: BUBBLE_LIGHT_STRENGTH }));
+        const bursts = currentMaze.flashes.map(({ x, y, startMs }) => ({
+            x,
+            y,
+            strength: BUBBLE_FLASH_STRENGTH * clamp(1 - (nowMs - startMs) / BUBBLE_FLASH_MS, 0, 1),
+        }));
+        return [...bubbles, ...bursts].filter(({ strength }) => strength > 0);
+    }
+
+    // How brightly the lights shine on the point (x, y) of the maze
+    function getGlowAt(lights, x, y) {
+        let glow = 0;
+        for (const light of lights) {
+            const dx = x - light.x;
+            const dy = y - light.y;
+            const distanceSquared = dx * dx + dy * dy;
+            if (distanceSquared < BUBBLE_LIGHT_REACH_SQUARES * BUBBLE_LIGHT_REACH_SQUARES) {
+                glow += light.strength / (1 + distanceSquared * BUBBLE_LIGHT_FALLOFF);
+            }
+        }
+        return glow;
+    }
+
+    // The floor and ceiling, worked out for every pixel of a half-size
+    // picture and stretched over the view. Each screen row below the
+    // horizon looks at the floor a set distance away (and above it, the
+    // ceiling), so walking across the row steps across the maze: each
+    // pixel takes the tile or grid line colour of the point it sees, plus
+    // any bubble light there, faded by the haze.
+    const floorCanvas = document.createElement("canvas");
+    floorCanvas.width = Math.round(VIEW_W * FLOOR_BUFFER_SCALE);
+    floorCanvas.height = Math.round(VIEW_H * FLOOR_BUFFER_SCALE);
+    const floorCtx = floorCanvas.getContext("2d");
+    const floorImage = floorCtx.createImageData(floorCanvas.width, floorCanvas.height);
+    function drawCeilingAndFloor(camera, lights) {
+        const { width, height } = floorCanvas;
+        const pixels = floorImage.data;
+        const leftX = camera.dirX - camera.planeX;
+        const leftY = camera.dirY - camera.planeY;
+        const spanX = 2 * camera.planeX;
+        const spanY = 2 * camera.planeY;
+
+        for (let row = 0; row < height; row++) {
+            const offset = (row + 0.5) / FLOOR_BUFFER_SCALE - camera.horizonY;
+            const distance = VIEW_H / 2 / Math.max(Math.abs(offset), 0.5);
+            const fog = getFogShare(distance);
+            const lineWidth = FLOOR_LINE_WIDTH_SQUARES + distance * FLOOR_LINE_WIDEN_PER_SQUARE;
+            let tileRgb = CEILING_TILE_RGB;
+            let lineRgb = CEILING_LINE_RGB;
+            let glowShare = 0.6;
+            if (offset > 0) {
+                tileRgb = FLOOR_TILE_RGB;
+                lineRgb = FLOOR_LINE_RGB;
+                glowShare = 1;
+            }
+            const stepX = (distance * spanX) / width;
+            const stepY = (distance * spanY) / width;
+            let worldX = camera.x + distance * leftX + stepX / 2;
+            let worldY = camera.y + distance * leftY + stepY / 2;
+
+            for (let column = 0; column < width; column++) {
+                const acrossX = worldX - Math.floor(worldX);
+                const acrossY = worldY - Math.floor(worldY);
+                const edge = Math.min(acrossX, 1 - acrossX, acrossY, 1 - acrossY);
+                const line = Math.max(0, 1 - edge / lineWidth);
+                let glow = 0;
+                if (lights.length > 0) {
+                    glow = getGlowAt(lights, worldX, worldY) * glowShare;
+                }
+                const index = (row * width + column) * 4;
+                for (let channel = 0; channel < 3; channel++) {
+                    const lit = tileRgb[channel] + (lineRgb[channel] - tileRgb[channel]) * line + BUBBLE_LIGHT_RGB[channel] * glow;
+                    pixels[index + channel] = lit * (1 - fog) + FOG_RGB[channel] * fog;
+                }
+                pixels[index + 3] = 255;
+                worldX += stepX;
+                worldY += stepY;
+            }
+        }
+
+        floorCtx.putImageData(floorImage, 0, 0);
+        ctx.imageSmoothingEnabled = true;
+        ctx.drawImage(floorCanvas, 0, 0, VIEW_W, VIEW_H);
     }
 
     // Casts one ray per screen column through the grid and draws the wall
     // it hits as a vertical strip of Matrix rain. Returns each column's
     // wall distance, so nearer things can be drawn in front and farther
     // ones hidden behind.
-    function drawWalls(currentMaze, camera, nowMs) {
+    function drawWalls(currentMaze, camera, lights, nowMs) {
         const wallDepths = new Array(VIEW_W).fill(Infinity);
 
         for (let column = 0; column < VIEW_W; column++) {
@@ -1940,7 +2135,13 @@
                 continue;
             }
             wallDepths[column] = hit.distance;
-            drawWallColumn(column, hit, camera.horizonY, currentMaze, nowMs);
+            // The distance is how far along the ray (not a unit length) the
+            // wall is, so it also finds the point that was hit
+            let glow = 0;
+            if (lights.length > 0) {
+                glow = getGlowAt(lights, camera.x + hit.distance * rayX, camera.y + hit.distance * rayY);
+            }
+            drawWallColumn(column, hit, camera.horizonY, glow, currentMaze, nowMs);
         }
 
         return wallDepths;
@@ -2004,22 +2205,22 @@
 
     // One screen column of Matrix rain wall: a 1-pixel-wide slice of the
     // rain picture in the wall's colour (fading to a new one if it was just
-    // shot), scrolled down at this glyph column's own speed and dimmed by
-    // distance, with a black seam down each corner
-    function drawWallColumn(column, { distance, isNorthSouthFace, hitAlong, squareX, squareY, stepSign }, horizonY, currentMaze, nowMs) {
+    // shot), scrolled down at this glyph column's own speed, lit by any
+    // nearby bubbles (glow) and faded into the haze by distance, with a
+    // black seam down each corner
+    function drawWallColumn(column, { distance, isNorthSouthFace, hitAlong, squareX, squareY, stepSign }, horizonY, glow, currentMaze, nowMs) {
         const wallHeight = VIEW_H / distance;
         const wallTop = horizonY - wallHeight / 2;
-
-        let light = clamp(1 - distance / FOG_DISTANCE_SQUARES, MIN_LIGHT, 1);
-        if (isNorthSouthFace) {
-            light *= SIDE_WALL_SHADE;
-        }
+        const fog = getFogShare(distance);
+        const fogColor = `rgba(${FOG_RGB.join(", ")}, ${fog})`;
 
         // Strips overlap a touch so no hairline gaps show between them once
         // the game is scaled to the window
         const edgeSide = getFaceEdgeSide(hitAlong);
         if (edgeSide !== 0 && isWallCorner(currentMaze.walls, { isNorthSouthFace, squareX, squareY, stepSign }, edgeSide)) {
-            ctx.fillStyle = toColor(WALL_SEAM_RGB, light);
+            ctx.fillStyle = toColor(WALL_SEAM_RGB, 1);
+            ctx.fillRect(column, wallTop, WALL_STRIP_OVERLAP_W, wallHeight);
+            ctx.fillStyle = fogColor;
             ctx.fillRect(column, wallTop, WALL_STRIP_OVERLAP_W, wallHeight);
             return;
         }
@@ -2055,7 +2256,17 @@
         }
         ctx.globalAlpha = 1;
 
-        ctx.fillStyle = `rgba(0, 0, 0, ${1 - light})`;
+        if (isNorthSouthFace) {
+            ctx.fillStyle = `rgba(0, 0, 0, ${1 - SIDE_WALL_SHADE})`;
+            ctx.fillRect(column, wallTop, WALL_STRIP_OVERLAP_W, wallHeight);
+        }
+        if (glow > 0) {
+            ctx.globalCompositeOperation = "lighter";
+            ctx.fillStyle = `rgba(${BUBBLE_LIGHT_RGB.join(", ")}, ${Math.min(1, glow * 0.6)})`;
+            ctx.fillRect(column, wallTop, WALL_STRIP_OVERLAP_W, wallHeight);
+            ctx.globalCompositeOperation = "source-over";
+        }
+        ctx.fillStyle = fogColor;
         ctx.fillRect(column, wallTop, WALL_STRIP_OVERLAP_W, wallHeight);
     }
 
@@ -2209,7 +2420,7 @@
 
         for (const { object, view } of projected) {
             if (object.kind === "enemy") {
-                drawEnemy(currentMaze, object.index, view, camera, wallDepths, nowMs);
+                drawEnemy(currentMaze, object, view, camera, wallDepths, nowMs);
                 continue;
             }
             if (object.kind === "bubble") {
@@ -2232,7 +2443,7 @@
             return;
         }
         const { x, y, radius } = getWorldBubbleOnScreen(view, camera);
-        drawBubble(x, y, radius, 1);
+        drawBubble(x, y, radius, 1 - getFogShare(view.depth));
     }
 
     // A power pellet floating over the floor, pulsing gently so it catches
@@ -2245,7 +2456,10 @@
         const pulse = 1 + 0.15 * Math.sin(nowMs / 150);
         const floorY = camera.horizonY + view.unitPx / 2;
         const centerY = floorY - DOT_HEIGHT_SHARE * view.unitPx;
+        // Pellets shine through the haze more than anything else
+        ctx.globalAlpha = 1 - getFogShare(view.depth) * 0.7;
         drawRainbowBall(view.screenX, centerY, Math.max(2, POWER_PELLET_RADIUS_SHARE * view.unitPx * pulse), nowMs);
+        ctx.globalAlpha = 1;
     }
 
     // A ball swirled with every colour of the rainbow, slowly spinning, with
@@ -2299,8 +2513,8 @@
         ctx.globalAlpha = 1;
     }
 
-    // A round thing (dot or pellet) floating at its height, dimmed by
-    // distance, drawn only if no wall is in front of it
+    // A round thing (dot or pellet) floating at its height, faded into the
+    // haze by distance, drawn only if no wall is in front of it
     function drawBall({ heightShare, radiusShare, color }, view, camera, wallDepths) {
         const column = Math.round(view.screenX);
         if (column < 0 || column >= VIEW_W || wallDepths[column] < view.depth) {
@@ -2309,9 +2523,8 @@
         const floorY = camera.horizonY + view.unitPx / 2;
         const centerY = floorY - heightShare * view.unitPx;
         const radius = Math.max(1, radiusShare * view.unitPx);
-        const light = clamp(1 - view.depth / FOG_DISTANCE_SQUARES, MIN_LIGHT, 1);
 
-        ctx.globalAlpha = 0.35 + 0.65 * light;
+        ctx.globalAlpha = 1 - getFogShare(view.depth) * 0.85;
         ctx.fillStyle = color;
         ctx.beginPath();
         ctx.arc(view.screenX, centerY, radius, 0, Math.PI * 2);
@@ -2320,17 +2533,19 @@
     }
 
     // An enemy standing on the floor, scuttling, with a soft shadow under
-    // it. The bug is drawn one screen column at a time so a wall in front
-    // of part of it hides just that part; the shadow shows only if the
-    // middle of the bug is in sight.
-    function drawEnemy(currentMaze, index, view, camera, wallDepths, nowMs) {
+    // it, seen from the side it is facing the guy with, and faded into the
+    // haze by distance. The bug is drawn one screen column at a time so a
+    // wall in front of part of it hides just that part; the shadow shows
+    // only if the middle of the bug is in sight.
+    function drawEnemy(currentMaze, { index, x, y }, view, camera, wallDepths, nowMs) {
         const hasTarget = isEnemyFrightened(currentMaze, index, nowMs);
         const legFrame = Math.floor(nowMs / BUG_LEG_STEP_MS) % 2;
-        let sprite = getEnemySprite(getEnemyColor(currentMaze, index, nowMs), hasTarget, legFrame);
-        let alpha = clamp(1 - view.depth / FOG_DISTANCE_SQUARES, MIN_LIGHT, 1) * 0.5 + 0.5;
+        const side = getBugSideSeen(currentMaze.enemyHeadings[index], x, y, camera);
+        let sprite = getEnemySprite(getEnemyColor(currentMaze, index, nowMs), hasTarget, legFrame, side);
+        let alpha = 1 - getFogShare(view.depth) * 0.9;
         if (currentMaze.returningEnemyCorners.has(index)) {
-            sprite = getEnemySprite(RETURNING_ENEMY_COLOR, false, legFrame);
-            alpha = RETURNING_ENEMY_ALPHA;
+            sprite = getEnemySprite(RETURNING_ENEMY_COLOR, false, legFrame, side);
+            alpha *= RETURNING_ENEMY_ALPHA;
         }
 
         const height = ENEMY_HEIGHT_SHARE * view.unitPx;
@@ -2388,153 +2603,291 @@
         return msLeft > 0 && msLeft < FRIGHTENED_FLASH_FINAL_MS && isFlashBlock;
     }
 
-    // The enemy as a bug in one colour, facing the guy, shaded as if lit
-    // from the upper left: a domed shell split down the middle with dark
-    // spots and a shine, a round head with glossy eyes and feelers, and
-    // three tube-shaded legs each side. legFrame (0 or 1) picks which legs
-    // are lifted, so swapping frames makes it scuttle. Drawn into its own
-    // small canvas the first time it is needed.
+    // Which side of a bug walking along heading the camera sees: "front"
+    // when it walks toward the guy, "back" when it walks away, otherwise
+    // "left" or "right" for the way it is crossing his view
+    function getBugSideSeen(heading, x, y, camera) {
+        const towardGuy = Math.atan2(camera.y - y, getWrappedDeltaX(x, camera.x));
+        const turnedAway = Math.abs(Math.atan2(Math.sin(heading - towardGuy), Math.cos(heading - towardGuy)));
+        if (turnedAway < Math.PI / 4) {
+            return "front";
+        }
+        if (turnedAway > (3 * Math.PI) / 4) {
+            return "back";
+        }
+        if (Math.cos(heading) * camera.planeX + Math.sin(heading) * camera.planeY > 0) {
+            return "right";
+        }
+        return "left";
+    }
+
+    // The enemy as a bug in one colour, seen from one side ("front",
+    // "back", "left" or "right"), shaded as if lit from above: a domed
+    // shell with dark spots and a shine, a round head with glossy eyes and
+    // feelers, and three tube-shaded legs each side. legFrame (0 or 1)
+    // picks which legs are lifted, so swapping frames makes it scuttle.
+    // Drawn into its own small canvas the first time it is needed; the
+    // left side is the right side mirrored.
     // hasTarget paints a red-and-white bullseye on the middle of its body,
     // shown on frightened enemies to say they are safe to hit
-    function getEnemySprite(color, hasTarget, legFrame = 0) {
-        const cacheKey = `${color}|${hasTarget}|${legFrame}`;
+    function getEnemySprite(color, hasTarget, legFrame = 0, side = "front") {
+        const cacheKey = `${color}|${hasTarget}|${legFrame}|${side}`;
         if (!enemySpriteCache.has(cacheKey)) {
             const block = ENEMY_SPRITE_BLOCK_PX;
             const sprite = document.createElement("canvas");
             sprite.width = 4 * block;
             sprite.height = 3 * block;
             const spriteCtx = sprite.getContext("2d");
-            const centerX = 2 * block;
-            const shellY = 1.85 * block;
-            const headY = 0.75 * block;
-            const rgb = parseHexColor(color);
-            const shade = (amount) => toColor(shadeRgb(rgb, amount), 1);
-
-            // Legs: out from the shell, then bending down to the floor, in
-            // a dark edge, the body colour and a thin shine along the top.
-            // Alternate legs lift each frame, the way insects walk.
             spriteCtx.lineCap = "round";
             spriteCtx.lineJoin = "round";
-            for (const side of [-1, 1]) {
-                [1.45, 1.9, 2.35].forEach((legY, legIndex) => {
-                    const isLifted = (legIndex + legFrame + (side > 0 ? 1 : 0)) % 2 === 0;
-                    let tipLift = 0;
-                    if (isLifted) {
-                        tipLift = BUG_LEG_LIFT_BLOCKS * block;
-                    }
-                    const points = [
-                        [centerX + side * 0.6 * block, legY * block],
-                        [centerX + side * 1.45 * block, (legY - 0.3) * block - tipLift / 2],
-                        [centerX + side * 1.85 * block, (legY + 0.45) * block - tipLift],
-                    ];
-                    const strokes = [
-                        { width: 0.2, color: shade(-0.6), shiftY: 0 },
-                        { width: 0.12, color: shade(-0.1), shiftY: 0 },
-                        { width: 0.04, color: shade(0.5), shiftY: -0.035 },
-                    ];
-                    for (const stroke of strokes) {
-                        spriteCtx.strokeStyle = stroke.color;
-                        spriteCtx.lineWidth = stroke.width * block;
-                        spriteCtx.beginPath();
-                        points.forEach(([x, y]) => spriteCtx.lineTo(x, y + stroke.shiftY * block));
-                        spriteCtx.stroke();
-                    }
-                });
-
-                // Feelers, with a shaded ball on the end
-                spriteCtx.strokeStyle = shade(-0.5);
-                spriteCtx.lineWidth = 0.08 * block;
-                spriteCtx.beginPath();
-                spriteCtx.moveTo(centerX + side * 0.2 * block, headY - 0.3 * block);
-                spriteCtx.quadraticCurveTo(centerX + side * 0.5 * block, 0.05 * block, centerX + side * 0.9 * block, 0.2 * block);
-                spriteCtx.stroke();
-                fillShadedBall(spriteCtx, centerX + side * 0.9 * block, 0.2 * block, 0.1 * block, rgb);
+            if (side === "left") {
+                spriteCtx.translate(sprite.width, 0);
+                spriteCtx.scale(-1, 1);
             }
+            const bug = { color, rgb: parseHexColor(color), legFrame, block };
 
-            // Shell
-            const shellGradient = spriteCtx.createRadialGradient(
-                centerX - 0.35 * block, shellY - 0.5 * block, 0.05 * block,
-                centerX, shellY, 1.2 * block,
-            );
-            shellGradient.addColorStop(0, shade(0.6));
-            shellGradient.addColorStop(0.35, color);
-            shellGradient.addColorStop(1, shade(-0.65));
-            spriteCtx.fillStyle = shellGradient;
-            spriteCtx.strokeStyle = BUG_OUTLINE_COLOR;
-            spriteCtx.lineWidth = 0.05 * block;
-            spriteCtx.beginPath();
-            spriteCtx.ellipse(centerX, shellY, 0.95 * block, 1.1 * block, 0, 0, Math.PI * 2);
-            spriteCtx.fill();
-            spriteCtx.stroke();
-
-            spriteCtx.fillStyle = shade(-0.55);
-            spriteCtx.globalAlpha = 0.7;
-            for (const [spotX, spotY, spotRadius] of BUG_SPOTS_BLOCKS) {
-                spriteCtx.beginPath();
-                spriteCtx.ellipse(centerX + spotX * block, shellY + spotY * block, spotRadius * block, spotRadius * 0.85 * block, 0, 0, Math.PI * 2);
-                spriteCtx.fill();
-            }
-            spriteCtx.globalAlpha = 1;
-
-            spriteCtx.strokeStyle = shade(-0.7);
-            spriteCtx.lineWidth = 0.06 * block;
-            spriteCtx.beginPath();
-            spriteCtx.moveTo(centerX, shellY - 0.7 * block);
-            spriteCtx.lineTo(centerX, shellY + 1.1 * block);
-            spriteCtx.stroke();
-
-            spriteCtx.fillStyle = "rgba(255, 255, 255, 0.55)";
-            spriteCtx.beginPath();
-            spriteCtx.ellipse(centerX - 0.4 * block, shellY - 0.55 * block, 0.24 * block, 0.12 * block, -0.6, 0, Math.PI * 2);
-            spriteCtx.fill();
-
-            // Shadow the head casts on the shell, then the head
-            spriteCtx.fillStyle = "rgba(0, 0, 0, 0.35)";
-            spriteCtx.beginPath();
-            spriteCtx.ellipse(centerX, headY + 0.45 * block, 0.5 * block, 0.18 * block, 0, 0, Math.PI * 2);
-            spriteCtx.fill();
-            fillShadedBall(spriteCtx, centerX, headY, 0.5 * block, rgb);
-            spriteCtx.strokeStyle = BUG_OUTLINE_COLOR;
-            spriteCtx.lineWidth = 0.05 * block;
-            spriteCtx.beginPath();
-            spriteCtx.arc(centerX, headY, 0.5 * block, 0, Math.PI * 2);
-            spriteCtx.stroke();
-
-            // Glossy eyes, each with a glint
-            for (const side of [-1, 1]) {
-                const eyeX = centerX + side * 0.2 * block;
-                const eyeY = headY - 0.05 * block;
-                const eyeGradient = spriteCtx.createRadialGradient(eyeX - 0.05 * block, eyeY - 0.05 * block, 0, eyeX, eyeY, 0.16 * block);
-                eyeGradient.addColorStop(0, "#ffffff");
-                eyeGradient.addColorStop(1, "#b8c4cc");
-                spriteCtx.fillStyle = eyeGradient;
-                spriteCtx.beginPath();
-                spriteCtx.arc(eyeX, eyeY, 0.16 * block, 0, Math.PI * 2);
-                spriteCtx.fill();
-                spriteCtx.fillStyle = "#000000";
-                spriteCtx.beginPath();
-                spriteCtx.arc(eyeX, eyeY + 0.04 * block, 0.08 * block, 0, Math.PI * 2);
-                spriteCtx.fill();
-                spriteCtx.fillStyle = "#ffffff";
-                spriteCtx.beginPath();
-                spriteCtx.arc(eyeX - 0.03 * block, eyeY + 0.01 * block, 0.025 * block, 0, Math.PI * 2);
-                spriteCtx.fill();
+            let shellCenter = null;
+            if (side === "front") {
+                shellCenter = drawBugFront(spriteCtx, bug);
+            } else if (side === "back") {
+                shellCenter = drawBugBack(spriteCtx, bug);
+            } else {
+                shellCenter = drawBugSide(spriteCtx, bug);
             }
 
             if (hasTarget) {
                 // Rings from the outside in, alternating red and white, on
                 // the shell
-                const centerY = shellY;
                 TARGET_RING_RADII_BLOCKS.forEach((radius, i) => {
                     spriteCtx.fillStyle = TARGET_RING_COLORS[i % TARGET_RING_COLORS.length];
                     spriteCtx.beginPath();
-                    spriteCtx.arc(centerX, centerY, radius * block, 0, Math.PI * 2);
+                    spriteCtx.arc(shellCenter[0], shellCenter[1], radius * block, 0, Math.PI * 2);
                     spriteCtx.fill();
                 });
             }
             enemySpriteCache.set(cacheKey, sprite);
         }
         return enemySpriteCache.get(cacheKey);
+    }
+
+    // The bug coming straight at the guy: legs out both sides, feelers up,
+    // its shell, and its head and eyes in front. Returns the shell's middle.
+    function drawBugFront(spriteCtx, bug) {
+        const { block, rgb } = bug;
+        const centerX = 2 * block;
+        const shellY = 1.85 * block;
+        const headY = 0.75 * block;
+
+        drawBugSideLegs(spriteCtx, bug, centerX);
+        drawBugFeelers(spriteCtx, bug, centerX, headY);
+        drawBugShell(spriteCtx, bug, centerX, shellY, 0.95 * block, 1.1 * block, true);
+
+        // Shadow the head casts on the shell, then the head
+        spriteCtx.fillStyle = "rgba(0, 0, 0, 0.35)";
+        spriteCtx.beginPath();
+        spriteCtx.ellipse(centerX, headY + 0.45 * block, 0.5 * block, 0.18 * block, 0, 0, Math.PI * 2);
+        spriteCtx.fill();
+        drawBugHead(spriteCtx, bug, centerX, headY, 0.5 * block);
+
+        for (const side of [-1, 1]) {
+            drawBugEye(spriteCtx, block, centerX + side * 0.2 * block, headY - 0.05 * block, 0, 0.04 * block);
+        }
+        return [centerX, shellY];
+    }
+
+    // The bug walking away: legs out both sides, feelers and the top of
+    // its head peeking over a shell that hides the rest. Returns the
+    // shell's middle.
+    function drawBugBack(spriteCtx, bug) {
+        const { block } = bug;
+        const centerX = 2 * block;
+        const shellY = 1.8 * block;
+        const headY = 0.85 * block;
+
+        drawBugSideLegs(spriteCtx, bug, centerX);
+        drawBugFeelers(spriteCtx, bug, centerX, headY);
+        drawBugHead(spriteCtx, bug, centerX, headY, 0.45 * block);
+        drawBugShell(spriteCtx, bug, centerX, shellY, 1 * block, 1.12 * block, false);
+        return [centerX, shellY];
+    }
+
+    // The bug crossing the view, facing right: its far legs in shadow
+    // behind, a long low shell, its head out in front with one eye looking
+    // ahead and feelers reaching forward, and its near legs over the
+    // shell's edge. Returns the shell's middle.
+    function drawBugSide(spriteCtx, bug) {
+        const { block, rgb, legFrame } = bug;
+        const shellX = 1.75 * block;
+        const shellY = 1.75 * block;
+        const headX = 3.15 * block;
+        const headY = 1.7 * block;
+
+        // Legs: from under the shell, up to a knee, and down to the floor,
+        // front legs reaching forward and back legs back. Near and far legs
+        // lift on opposite frames.
+        const drawLegRow = (isNear) => {
+            [-1, 0, 1].forEach((reach, legIndex) => {
+                const isLifted = (legIndex + legFrame + (isNear ? 1 : 0)) % 2 === 0;
+                let lift = 0;
+                if (isLifted) {
+                    lift = BUG_LEG_LIFT_BLOCKS * block;
+                }
+                const hipX = shellX + reach * 0.6 * block;
+                const shift = isNear ? 0 : 0.12 * block;
+                drawBugLeg(spriteCtx, bug, [
+                    [hipX + shift, 2.15 * block - shift],
+                    [hipX + reach * 0.35 * block + shift, 2.05 * block - lift / 2 - shift],
+                    [hipX + reach * 0.6 * block + shift, 2.85 * block - lift - shift],
+                ], isNear ? 0 : -0.35);
+            });
+        };
+        drawLegRow(false);
+
+        // Feelers: the far one first, both reaching forward and up
+        for (const shift of [0.1, 0]) {
+            spriteCtx.strokeStyle = toColor(shadeRgb(rgb, -0.5 - shift * 2), 1);
+            spriteCtx.lineWidth = 0.08 * block;
+            spriteCtx.beginPath();
+            spriteCtx.moveTo(headX + 0.15 * block, headY - 0.4 * block - shift * block);
+            spriteCtx.quadraticCurveTo(headX + 0.35 * block, 0.55 * block, headX + 0.75 * block, (0.65 - shift) * block);
+            spriteCtx.stroke();
+            fillShadedBall(spriteCtx, headX + 0.75 * block, (0.65 - shift) * block, 0.1 * block, rgb);
+        }
+
+        drawBugShell(spriteCtx, bug, shellX, shellY, 1.3 * block, 0.85 * block, false);
+        drawLegRow(true);
+        drawBugHead(spriteCtx, bug, headX, headY, 0.5 * block);
+        drawBugEye(spriteCtx, block, headX + 0.22 * block, headY - 0.12 * block, 0.06 * block, 0.02 * block);
+        return [shellX, shellY];
+    }
+
+    // Three legs each side of a bug seen from the front or back: out from
+    // the shell, then bending down to the floor. Alternate legs lift each
+    // frame, the way insects walk.
+    function drawBugSideLegs(spriteCtx, bug, centerX) {
+        const { block, legFrame } = bug;
+        for (const side of [-1, 1]) {
+            [1.45, 1.9, 2.35].forEach((legY, legIndex) => {
+                const isLifted = (legIndex + legFrame + (side > 0 ? 1 : 0)) % 2 === 0;
+                let tipLift = 0;
+                if (isLifted) {
+                    tipLift = BUG_LEG_LIFT_BLOCKS * block;
+                }
+                drawBugLeg(spriteCtx, bug, [
+                    [centerX + side * 0.6 * block, legY * block],
+                    [centerX + side * 1.45 * block, (legY - 0.3) * block - tipLift / 2],
+                    [centerX + side * 1.85 * block, (legY + 0.45) * block - tipLift],
+                ], 0);
+            });
+        }
+    }
+
+    // One leg through these points, as a tube: a dark edge, the body
+    // colour and a thin shine along the top, all darkened by `darken`
+    function drawBugLeg(spriteCtx, { block, rgb }, points, darken) {
+        const strokes = [
+            { width: 0.2, shade: -0.6, shiftY: 0 },
+            { width: 0.12, shade: -0.1, shiftY: 0 },
+            { width: 0.04, shade: 0.5, shiftY: -0.035 },
+        ];
+        for (const stroke of strokes) {
+            spriteCtx.strokeStyle = toColor(shadeRgb(rgb, Math.max(-1, stroke.shade + darken)), 1);
+            spriteCtx.lineWidth = stroke.width * block;
+            spriteCtx.beginPath();
+            points.forEach(([x, y]) => spriteCtx.lineTo(x, y + stroke.shiftY * block));
+            spriteCtx.stroke();
+        }
+    }
+
+    // Two feelers curving up and out from the top of the head, each with
+    // a shaded ball on the end
+    function drawBugFeelers(spriteCtx, { block, rgb }, centerX, headY) {
+        for (const side of [-1, 1]) {
+            spriteCtx.strokeStyle = toColor(shadeRgb(rgb, -0.5), 1);
+            spriteCtx.lineWidth = 0.08 * block;
+            spriteCtx.beginPath();
+            spriteCtx.moveTo(centerX + side * 0.2 * block, headY - 0.3 * block);
+            spriteCtx.quadraticCurveTo(centerX + side * 0.5 * block, headY - 0.7 * block, centerX + side * 0.9 * block, headY - 0.55 * block);
+            spriteCtx.stroke();
+            fillShadedBall(spriteCtx, centerX + side * 0.9 * block, headY - 0.55 * block, 0.1 * block, rgb);
+        }
+    }
+
+    // The domed shell: lit at its upper left and dark round its rim, with
+    // dark spots, a split down the middle (when seen from the front or
+    // back, hasSplit) and a shine
+    function drawBugShell(spriteCtx, { block, rgb, color }, centerX, centerY, radiusX, radiusY, hasSplit) {
+        const shade = (amount) => toColor(shadeRgb(rgb, amount), 1);
+        const gradient = spriteCtx.createRadialGradient(
+            centerX - 0.35 * radiusX, centerY - 0.45 * radiusY, 0.05 * block,
+            centerX, centerY, 1.2 * Math.max(radiusX, radiusY),
+        );
+        gradient.addColorStop(0, shade(0.6));
+        gradient.addColorStop(0.35, color);
+        gradient.addColorStop(1, shade(-0.65));
+        spriteCtx.fillStyle = gradient;
+        spriteCtx.strokeStyle = BUG_OUTLINE_COLOR;
+        spriteCtx.lineWidth = 0.05 * block;
+        spriteCtx.beginPath();
+        spriteCtx.ellipse(centerX, centerY, radiusX, radiusY, 0, 0, Math.PI * 2);
+        spriteCtx.fill();
+        spriteCtx.stroke();
+
+        const scaleX = radiusX / (0.95 * block);
+        const scaleY = radiusY / (1.1 * block);
+        spriteCtx.fillStyle = shade(-0.55);
+        spriteCtx.globalAlpha = 0.7;
+        for (const [spotX, spotY, spotRadius] of BUG_SPOTS_BLOCKS) {
+            spriteCtx.beginPath();
+            spriteCtx.ellipse(
+                centerX + spotX * block * scaleX, centerY + spotY * block * scaleY,
+                spotRadius * block * scaleX, spotRadius * 0.85 * block * scaleY, 0, 0, Math.PI * 2,
+            );
+            spriteCtx.fill();
+        }
+        spriteCtx.globalAlpha = 1;
+
+        if (hasSplit) {
+            spriteCtx.strokeStyle = shade(-0.7);
+            spriteCtx.lineWidth = 0.06 * block;
+            spriteCtx.beginPath();
+            spriteCtx.moveTo(centerX, centerY - 0.65 * radiusY);
+            spriteCtx.lineTo(centerX, centerY + radiusY);
+            spriteCtx.stroke();
+        }
+
+        spriteCtx.fillStyle = "rgba(255, 255, 255, 0.55)";
+        spriteCtx.beginPath();
+        spriteCtx.ellipse(centerX - 0.42 * radiusX, centerY - 0.5 * radiusY, 0.24 * block, 0.12 * block, -0.6, 0, Math.PI * 2);
+        spriteCtx.fill();
+    }
+
+    function drawBugHead(spriteCtx, { block, rgb }, centerX, centerY, radius) {
+        fillShadedBall(spriteCtx, centerX, centerY, radius, rgb);
+        spriteCtx.strokeStyle = BUG_OUTLINE_COLOR;
+        spriteCtx.lineWidth = 0.05 * block;
+        spriteCtx.beginPath();
+        spriteCtx.arc(centerX, centerY, radius, 0, Math.PI * 2);
+        spriteCtx.stroke();
+    }
+
+    // A glossy eye with a glint, its pupil shifted by (lookX, lookY)
+    function drawBugEye(spriteCtx, block, eyeX, eyeY, lookX, lookY) {
+        const eyeGradient = spriteCtx.createRadialGradient(eyeX - 0.05 * block, eyeY - 0.05 * block, 0, eyeX, eyeY, 0.16 * block);
+        eyeGradient.addColorStop(0, "#ffffff");
+        eyeGradient.addColorStop(1, "#b8c4cc");
+        spriteCtx.fillStyle = eyeGradient;
+        spriteCtx.beginPath();
+        spriteCtx.arc(eyeX, eyeY, 0.16 * block, 0, Math.PI * 2);
+        spriteCtx.fill();
+        spriteCtx.fillStyle = "#000000";
+        spriteCtx.beginPath();
+        spriteCtx.arc(eyeX + lookX, eyeY + lookY, 0.08 * block, 0, Math.PI * 2);
+        spriteCtx.fill();
+        spriteCtx.fillStyle = "#ffffff";
+        spriteCtx.beginPath();
+        spriteCtx.arc(eyeX + lookX - 0.03 * block, eyeY + lookY - 0.03 * block, 0.025 * block, 0, Math.PI * 2);
+        spriteCtx.fill();
     }
 
     // A ball in this colour, lit from the upper left: bright where the
