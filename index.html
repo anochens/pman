@@ -393,6 +393,9 @@
     // facing the way it was until it is crossing the view by this much
     // (about 0.65 is straight across), so it doesn't flicker between sides
     const BUG_FLIP_ACROSS_SHARE = 0.15;
+
+    // A bug heading this close to straight at the guy is seen face on
+    const BUG_FRONT_VIEW_RADIANS = Math.PI / 4;
     const BUG_OUTLINE_COLOR = "rgba(0, 0, 0, 0.55)";
 
     // The bullseye on a frightened enemy: ring sizes in blocks from the
@@ -2671,14 +2674,15 @@
     }
 
     // An enemy standing on the floor, scuttling, with a soft shadow under
-    // it, crawling side-on the way it is crossing the view, and faded into
-    // the haze by distance. The bug is drawn one screen column at a time so
+    // it, face on if it is coming at the guy or else crawling side-on the
+    // way it is crossing the view, and faded into the haze by distance. The bug is drawn one screen column at a time so
     // a wall in front of part of it hides just that part; the shadow shows
     // only if the middle of the bug is in sight.
     function drawEnemy(currentMaze, index, view, camera, wallDepths, nowMs) {
         const hasTarget = isEnemyFrightened(currentMaze, index, nowMs);
         const legFrame = Math.floor(nowMs / BUG_LEG_STEP_MS) % 2;
-        const side = getBugCrawlSide(index, currentMaze.enemyHeadings[index], camera);
+        const { x, y } = currentMaze.enemyPositions[index];
+        const side = getBugCrawlSide(index, currentMaze.enemyHeadings[index], x, y, camera);
         let sprite = getEnemySprite(getEnemyColor(currentMaze, index, nowMs), hasTarget, legFrame, side);
         let alpha = 1 - getFogShare(view.depth) * 0.9;
         if (currentMaze.returningEnemyCorners.has(index)) {
@@ -2745,10 +2749,16 @@
     // index, so it only flips once it is clearly crossing the other way
     const bugCrawlSides = new Map();
 
-    // Which way a bug walking along heading crawls across the view, "left"
-    // or "right". One walking nearly straight toward or away from the guy
-    // keeps the way it was crawling.
-    function getBugCrawlSide(index, heading, camera) {
+    // Which way a bug at (x, y) walking along heading is seen: "front" when
+    // it is coming at the guy, otherwise crawling "left" or "right" across
+    // the view. One walking nearly straight away keeps the way it was
+    // crawling.
+    function getBugCrawlSide(index, heading, x, y, camera) {
+        const towardGuy = Math.atan2(camera.y - y, getWrappedDeltaX(x, camera.x));
+        const offCourse = Math.abs(Math.atan2(Math.sin(heading - towardGuy), Math.cos(heading - towardGuy)));
+        if (offCourse < BUG_FRONT_VIEW_RADIANS) {
+            return "front";
+        }
         const across = Math.cos(heading) * camera.planeX + Math.sin(heading) * camera.planeY;
         if (across > BUG_FLIP_ACROSS_SHARE) {
             bugCrawlSides.set(index, "right");
@@ -2763,10 +2773,11 @@
         return bugCrawlSides.get(index) ?? "right";
     }
 
-    // The enemy as a bug in one colour, crawling side-on toward the
-    // "left" or "right", shaded as if lit from above: a long domed shell
-    // with dark spots and a shine, a round head with a glossy eye and
-    // feelers, and three tube-shaded legs each side. legFrame (0 or 1)
+    // The enemy as a bug in one colour, low on its belly, crawling side-on
+    // toward the "left" or "right" or coming straight on ("front"),
+    // shaded as if lit from above: a long domed shell with dark spots and
+    // a shine, a round head with glossy eyes and feelers, and three
+    // tube-shaded legs each side. legFrame (0 or 1)
     // picks which legs are lifted, so swapping frames makes it scuttle.
     // Drawn into its own small canvas the first time it is needed; the
     // left side is the right side mirrored.
@@ -2786,7 +2797,13 @@
                 spriteCtx.translate(sprite.width, 0);
                 spriteCtx.scale(-1, 1);
             }
-            const shellCenter = drawBugSide(spriteCtx, { color, rgb: parseHexColor(color), legFrame, block });
+            const bug = { color, rgb: parseHexColor(color), legFrame, block };
+            let shellCenter = null;
+            if (side === "front") {
+                shellCenter = drawBugFront(spriteCtx, bug);
+            } else {
+                shellCenter = drawBugSide(spriteCtx, bug);
+            }
 
             if (hasTarget) {
                 // Rings from the outside in, alternating red and white, on
@@ -2801,6 +2818,57 @@
             enemySpriteCache.set(cacheKey, sprite);
         }
         return enemySpriteCache.get(cacheKey);
+    }
+
+    // The bug crawling straight at the guy, low on its belly: legs splayed
+    // out both sides, the far pairs higher up and in shadow, a wide low
+    // shell behind, and its head in front with both eyes looking at him
+    // and feelers up. Returns the shell's middle.
+    function drawBugFront(spriteCtx, bug) {
+        const { block, rgb, legFrame } = bug;
+        const centerX = 2 * block;
+        const shellY = 1.7 * block;
+        const headY = 2.05 * block;
+
+        // Back legs first, front ones last, each pair lifting on opposite
+        // frames
+        const drawLegPair = (legIndex) => {
+            const depth = [0.3, 0.15, 0][legIndex];
+            for (const side of [-1, 1]) {
+                const isLifted = (legIndex + legFrame + (side > 0 ? 1 : 0)) % 2 === 0;
+                let lift = 0;
+                if (isLifted) {
+                    lift = BUG_LEG_LIFT_BLOCKS * block;
+                }
+                const hipY = (2.05 - depth) * block;
+                drawBugLeg(spriteCtx, bug, [
+                    [centerX + side * (0.75 + depth) * block, hipY],
+                    [centerX + side * (1.4 + depth) * block, hipY - 0.35 * block - lift / 2],
+                    [centerX + side * (1.8 + depth / 2) * block, (2.9 - depth) * block - lift],
+                ], -depth * 1.5);
+            }
+        };
+        drawLegPair(0);
+        drawLegPair(1);
+        drawBugShell(spriteCtx, bug, centerX, shellY, 1.2 * block, 0.7 * block);
+        drawLegPair(2);
+
+        // Feelers up and out from the top of the head
+        for (const side of [-1, 1]) {
+            spriteCtx.strokeStyle = toColor(shadeRgb(rgb, -0.5), 1);
+            spriteCtx.lineWidth = 0.08 * block;
+            spriteCtx.beginPath();
+            spriteCtx.moveTo(centerX + side * 0.2 * block, headY - 0.4 * block);
+            spriteCtx.quadraticCurveTo(centerX + side * 0.4 * block, 0.85 * block, centerX + side * 0.8 * block, 0.8 * block);
+            spriteCtx.stroke();
+            fillShadedBall(spriteCtx, centerX + side * 0.8 * block, 0.8 * block, 0.1 * block, rgb);
+        }
+
+        drawBugHead(spriteCtx, bug, centerX, headY, 0.5 * block);
+        for (const side of [-1, 1]) {
+            drawBugEye(spriteCtx, block, centerX + side * 0.2 * block, headY - 0.08 * block, 0, 0.04 * block);
+        }
+        return [centerX, shellY];
     }
 
     // The bug crossing the view, facing right: its far legs in shadow
